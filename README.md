@@ -1,7 +1,8 @@
 # Clinically backend
 
 API for Clinically, a doctor appointment and OPD-queue app for Patna. Built so far: doctor
-registration, sign-in sessions, the full data model and `GET /api/doctor/me`.
+registration, sign-in sessions, the full data model, `GET /api/doctor/me`, and the patient-facing
+doctor listing, booking, booking status and cancellation.
 
 FastAPI · PostgreSQL 16 · SQLAlchemy 2 · Alembic · argon2id
 
@@ -99,6 +100,50 @@ Every attempt is recorded in `login_attempts`, including ones refused with 429.
   `fee` is in whole rupees; `opdStart`/`opdEnd` are `HH:MM` Asia/Kolkata times.
 - **401** `Please sign in.`
 
+### Patient app (`/api/public`, no login)
+
+Only verified doctors are listed or bookable. A booking is protected by its **tracking code**, which
+is returned once at booking and stored only as a hash. An unknown booking and a wrong code both
+return 404.
+
+#### `GET /api/public/doctors?search=&department=`
+One entry per doctor per clinic: `{ id, doctorId, fullName, department, qualification,
+experienceYears, fee, waitingToday, clinic: {doctorClinicId, clinicId, name, area, address, phone,
+fee, opdDays, opdStart, opdEnd} }`. `search` matches doctor name, department, clinic name or area.
+`department` is an exact, case-insensitive match.
+
+#### `GET /api/public/doctors/:id`
+`{ id, fullName, department, qualification, experienceYears, clinics: [{ …clinic, waitingToday,
+todaySessionStatus, nowServing }] }`
+
+#### `POST /api/public/bookings`
+Body: `{ doctorClinicId, date: "YYYY-MM-DD", visitType: NEW|FOLLOW_UP|REPORT_REVIEW,
+patient: { name, phone, age, gender: MALE|FEMALE|OTHER, heightCm?, weightKg? }, recordsConsent }`
+
+- **201** `{ bookingId, token, trackingCode }`
+- **400** for invalid input, a date outside today to 7 days ahead, a day the doctor has no OPD there,
+  or today after OPD hours have ended
+- **404** if the doctor or clinic is unknown or unverified
+- **409** if the session is closed, or the patient already has an active token in it
+
+Rules:
+- **Tokens:** the day's session is created on the first booking. Tokens are assigned while holding a
+  row lock on the session, so parallel bookings never get the same number. Cancelled tokens are
+  never reused.
+- **Patients:** the same phone and name (ignoring case and extra spaces) is the same patient, so
+  earlier tests and records carry over. Height and weight update to the latest values.
+  `recordsConsent: true` grants consent (keeping the first consent time); `false` withdraws it.
+
+#### `GET /api/public/bookings/:id?code=`
+`{ bookingId, token, status, nowServing, patientsAhead, estimatedMinutes, sessionStatus, sessionId,
+date, doctorName, clinicName, opdStart }`. `patientsAhead` counts WAITING tokens before this one.
+`estimatedMinutes` = patients ahead × today's average consult time in this session (10 minutes
+until someone has been seen), and is `null` once the patient isn't waiting.
+
+#### `POST /api/public/bookings/:id/cancel`
+Body `{ code, reason? }`. **200** `{ bookingId, status: "CANCELLED" }`; **409** unless the booking is
+WAITING.
+
 ### `GET /api/health`
 - **200** `{ "status": "ok" }` after `SELECT 1`, or **503** if the database is unreachable
 
@@ -140,6 +185,10 @@ app/deps.py          signed-in doctor dependency
 app/timeutil.py      Asia/Kolkata dates
 app/routers/auth.py  register, login, me, logout
 app/routers/doctor.py  doctor-side endpoints
+app/routers/public.py  patient-facing endpoints
+app/bookings.py      booking rules (token locking, patient matching, queue estimates)
+app/events.py        real-time event hub (Socket.IO plugs in here)
+app/serializers.py   shared JSON shapes
 scripts/seed.py      demo data
 alembic/             migrations
 tests/               pytest suite (uses a separate database)

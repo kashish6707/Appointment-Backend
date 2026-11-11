@@ -3,24 +3,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from app.deps import CurrentDoctor, Db
-from app.models import Doctor, DoctorClinic
+from app.models import DoctorClinic
+from app.serializers import clinic_slot
 
 router = APIRouter(prefix="/api/doctor")
-
-
-def clinic_json(dc: DoctorClinic) -> dict:
-    return {
-        "doctorClinicId": str(dc.id),
-        "clinicId": str(dc.clinic.id),
-        "name": dc.clinic.name,
-        "area": dc.clinic.area,
-        "address": dc.clinic.address,
-        "phone": dc.clinic.phone,
-        "fee": dc.fee,
-        "opdDays": dc.opd_days,
-        "opdStart": dc.opd_start.strftime("%H:%M"),
-        "opdEnd": dc.opd_end.strftime("%H:%M"),
-    }
 
 
 @router.get("/me")
@@ -42,6 +28,6 @@ def me(doctor: CurrentDoctor, db: Db):
             "experienceYears": doctor.experience_years,
             "registrationNo": doctor.registration_no,
             "verified": doctor.is_verified,
-            "clinics": [clinic_json(dc) for dc in clinics],
+            "clinics": [clinic_slot(dc) for dc in clinics],
         }
     }

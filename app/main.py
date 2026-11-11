@@ -7,7 +7,7 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.db import engine
-from app.routers import auth, doctor
+from app.routers import auth, doctor, public
 from app.schemas import FIELD_MSGS, METHOD_MSG
 
 log = logging.getLogger("clinically")
@@ -17,6 +17,7 @@ log = logging.getLogger("clinically")
 app = FastAPI(title="Clinically API", docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth.router)
 app.include_router(doctor.router)
+app.include_router(public.router)
 
 
 def error(status: int, message: str) -> JSONResponse:
@@ -58,7 +59,10 @@ def _validation_message(errors: list[dict]) -> str:
 
 @app.exception_handler(RequestValidationError)
 async def on_validation_error(request: Request, exc: RequestValidationError):
-    return error(400, _validation_message(exc.errors()))
+    errors = exc.errors()
+    if errors and errors[0]["loc"][0] == "path":  # e.g. a malformed id in the URL
+        return error(404, "We couldn't find that.")
+    return error(400, _validation_message(errors))
 
 
 @app.exception_handler(StarletteHTTPException)

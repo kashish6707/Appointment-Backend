@@ -13,11 +13,15 @@ import pytest  # noqa: E402
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from datetime import time  # noqa: E402
+
 from sqlalchemy import create_engine, text  # noqa: E402
 
 from app.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Base  # noqa: E402
+from app import events, security  # noqa: E402
+from app.db import SessionLocal  # noqa: E402
+from app.models import WEEKDAYS, Base, Clinic, Doctor, DoctorClinic  # noqa: E402
 
 
 def _create_test_database() -> None:
@@ -59,3 +63,39 @@ def client():
 def db():
     with engine.connect() as conn:
         yield conn
+
+
+@pytest.fixture
+def make_slot():
+    """Create a doctor sitting at a clinic. OPD runs all day, every day, unless overridden."""
+    counter = iter(range(1, 1000))
+
+    def make(*, verified=True, days=WEEKDAYS, start=time(0, 0), end=time(23, 59), **doctor_fields):
+        n = next(counter)
+        with SessionLocal() as s:
+            doctor = Doctor(
+                full_name=doctor_fields.pop("full_name", f"Dr Test {n}"),
+                phone=doctor_fields.pop("phone", f"90000000{n:02d}"),
+                password_hash=security.hash_password("secret123"),
+                department=doctor_fields.pop("department", "Orthopaedics"),
+                is_verified=verified,
+                **doctor_fields,
+            )
+            clinic = Clinic(name=f"Test Clinic {n}", area="Boring Road", address=f"{n} Test Lane, Patna")
+            slot = DoctorClinic(
+                doctor=doctor, clinic=clinic, fee=400, opd_days=list(days), opd_start=start, opd_end=end
+            )
+            s.add_all([doctor, clinic, slot])
+            s.commit()
+            return slot
+
+    return make
+
+
+@pytest.fixture
+def emitted():
+    """Every real-time event emitted during the test, as (room, event, payload)."""
+    log = []
+    unsubscribe = events.subscribe(lambda room, event, payload: log.append((room, event, payload)))
+    yield log
+    unsubscribe()

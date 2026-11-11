@@ -208,6 +208,9 @@ class Booking(Base):
     source: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, default="WAITING", server_default="WAITING")
     booked_at: Mapped[datetime] = created_at()
+    # When the patient was called in, and when their consult ended. Used for wait estimates.
+    called_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_reason: Mapped[str | None] = mapped_column(Text)
     cancelled_by: Mapped[str | None] = mapped_column(Text)

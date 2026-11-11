@@ -6,10 +6,9 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
-from app import booking_payments
+from app import booking_payments, notify
 from app.deps import Db
 from app.payments import get_gateway
-from app.routers.public import notify_booking
 
 router = APIRouter(prefix="/api/payments")
 log = logging.getLogger("clinically.payments")
@@ -46,5 +45,5 @@ def _confirm(db: Db, order_id: str, payment_id: str) -> dict:
     if booking is None:
         booking_payments.refund(db, payment)
     elif not already_paid:
-        notify_booking(booking, "booking.created", payment.doctor_clinic.doctor_id)
+        notify.booking_and_queue(booking, payment.doctor_clinic.doctor_id, "booking.created")
     return {"status": "ok"}

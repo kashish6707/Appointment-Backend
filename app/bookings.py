@@ -207,7 +207,7 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
     dc = session.doctor_clinic
     ahead = 0
     estimate = None
-    if booking.status == "WAITING":
+    if booking.status == "WAITING" and session.status != "CLOSED":
         ahead = db.scalar(
             select(func.count()).where(
                 Booking.session_id == session.id, Booking.status == "WAITING", Booking.token < booking.token

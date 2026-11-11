@@ -7,12 +7,12 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import joinedload
 
-from app import booking_payments, bookings, events, security
+from app import booking_payments, bookings, notify, security
 from app.deps import Db
 from app.models import Booking, Clinic, Doctor, DoctorClinic, OpdSession, Payment
 from app.payments import get_gateway
 from app.schemas import BookingIn, CancelIn, PaymentConfirmIn
-from app.serializers import booking_item, clinic_slot
+from app.serializers import clinic_slot
 from app.timeutil import now_ist, today_ist
 
 router = APIRouter(prefix="/api/public")
@@ -112,13 +112,6 @@ def get_doctor(doctor_id: uuid.UUID, db: Db):
     }
 
 
-def notify_booking(booking: Booking, event: str, doctor_id: uuid.UUID) -> None:
-    """Tell the doctor's dashboard and everyone watching this session's queue."""
-    events.emit(f"doctor:{doctor_id}", event, booking_item(booking))
-    events.emit(f"booking:{booking.id}", "booking.updated", {"id": str(booking.id), "status": booking.status})
-    events.emit(f"session:{booking.session_id}", "session.updated", {"id": str(booking.session_id)})
-
-
 def _rupees(paise: int) -> int:
     return paise // 100
 
@@ -155,7 +148,7 @@ def create_booking(body: BookingIn, db: Db):
     )
     booking, code = bookings.add_booking(db, session, patient, visit_type=body.visit_type, source="ONLINE")
     db.commit()
-    notify_booking(booking, "booking.created", dc.doctor_id)
+    notify.booking_and_queue(booking, dc.doctor_id, "booking.created")
     return {"bookingId": str(booking.id), "token": booking.token, "trackingCode": code, "payment": None}
 
 
@@ -181,7 +174,7 @@ def confirm_payment(booking_id: uuid.UUID, body: PaymentConfirmIn, db: Db):
             f"We couldn't book this token: {payment.note} "
             f"Your \u20b9{_rupees(payment.amount_paise)} will be refunded.",
         )
-    notify_booking(booking, "booking.created", payment.doctor_clinic.doctor_id)
+    notify.booking_and_queue(booking, payment.doctor_clinic.doctor_id, "booking.created")
     return {"bookingId": str(booking.id), "token": booking.token, "status": booking.status}
 
 
@@ -254,7 +247,7 @@ def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db):
     if refundable:
         booking_payments.mark_for_refund(payment, "Cancelled by patient before OPD started")
     db.commit()
-    notify_booking(booking, "booking.cancelled", doctor_id)
+    notify.booking_and_queue(booking, doctor_id, "booking.cancelled")
 
     refund = None
     if refundable:

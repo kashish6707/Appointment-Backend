@@ -3,7 +3,8 @@
 API for Clinically, a doctor appointment and OPD-queue app for Patna. Built so far: doctor
 registration, sign-in sessions, the full data model, `GET /api/doctor/me`, and the patient-facing
 doctor listing, booking with an online token-amount payment (Razorpay), booking status and
-cancellation with refunds.
+cancellation with refunds, and the doctor's queue controls (start/pause/resume/end, call next,
+outcomes, walk-ins).
 
 FastAPI · PostgreSQL 16 · SQLAlchemy 2 · Alembic · argon2id
 
@@ -103,6 +104,45 @@ Every attempt is recorded in `login_attempts`, including ones refused with 429.
   "name", "area", "address", "phone", "fee", "opdDays", "opdStart", "opdEnd" }] } }`.
   `fee` is in whole rupees; `opdStart`/`opdEnd` are `HH:MM` Asia/Kolkata times.
 - **401** `Please sign in.`
+
+### Running the OPD queue (doctor, signed in)
+
+Each of these locks the session row first, the same lock bookings take, so a double-clicked
+"Next" or a booking arriving at the same moment can't scramble the queue. A session or booking that
+belongs to another doctor returns 404, the same as one that doesn't exist. Responses with a session
+use `{ id, doctorClinicId, date, status, startedAt, currentToken }`; bookings use
+`{ id, sessionId, token, status, visitType, source, bookedAt, calledAt, completedAt, cancelledAt,
+cancelledBy, cancelReason, patient: { id, name, phone, age, gender } }`.
+
+#### `POST /api/doctor/sessions/:id/start | pause | resume | end`
+**200** `{ session }`. `start`: NOT_STARTED → IN_OPD. `pause`: IN_OPD → ON_BREAK. `resume`:
+ON_BREAK → IN_OPD. These three only work on today's session. `end` closes a session on any date,
+which is also how a doctor closes a future day for bookings. The patient currently with the doctor
+is marked DONE; waiting patients are left as they are. **409** for a change that doesn't fit the
+current status (the message says why).
+
+#### `POST /api/doctor/sessions/:id/next`
+Marks the patient with the doctor DONE and calls the lowest WAITING token (skipping cancelled and
+no-show ones). **200** `{ session, finished: booking | null, current: booking | null }`; `current` is
+`null` when nobody is waiting. **409** unless OPD is running today.
+
+#### `PATCH /api/doctor/bookings/:id/status`
+Body `{ status: DONE | SENT_FOR_TESTS | NO_SHOW }`. **200** booking. Also used to correct a mistake.
+**409** for a cancelled booking.
+
+#### `POST /api/doctor/sessions/:id/walk-ins`
+Body `{ name, phone?, age, gender, visitType? (default NEW) }`. **201** `{ booking, trackingCode }`.
+Today's open session only. Walk-ins pay in full at reception; their records consent is never
+changed here.
+
+### Real-time events
+
+Every change is emitted through `app/events.py` after it's committed (Socket.IO is wired up in a
+later section):
+- `doctor:<doctorId>`: `booking.created`, `booking.updated`, `booking.cancelled` (payload: booking)
+  and `session.updated` (payload: session)
+- `session:<sessionId>`: `session.updated` `{ id, status, nowServing }`
+- `booking:<bookingId>`: `booking.updated` `{ id, token, status }`
 
 ### Patient app (`/api/public`, no login)
 
@@ -235,6 +275,8 @@ app/bookings.py      booking rules (token locking, patient matching, queue estim
 app/booking_payments.py  token-amount payments, confirmation and refunds
 app/payments.py      Razorpay client and the fake gateway
 app/routers/payments.py  Razorpay webhook
+app/routers/queue.py   doctor's OPD queue controls
+app/notify.py        which events each change sends
 app/events.py        real-time event hub (Socket.IO plugs in here)
 app/serializers.py   shared JSON shapes
 scripts/seed.py      demo data

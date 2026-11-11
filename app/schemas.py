@@ -49,6 +49,7 @@ FIELD_MSGS = {
     "patient": "Add the patient's details.",
     "code": CODE_MSG,
     "reason": REASON_MSG,
+    "status": "Choose a status: done, sent for tests or no-show.",
     "razorpayOrderId": "The payment details are incomplete. Please try again.",
     "razorpayPaymentId": "The payment details are incomplete. Please try again.",
     "razorpaySignature": "The payment details are incomplete. Please try again.",
@@ -225,3 +226,24 @@ class PaymentConfirmIn(_Body):
     razorpay_order_id: str = Field(alias="razorpayOrderId", min_length=1, max_length=100)
     razorpay_payment_id: str = Field(alias="razorpayPaymentId", min_length=1, max_length=100)
     razorpay_signature: str = Field(alias="razorpaySignature", min_length=1, max_length=200)
+
+
+# --- doctor: queue ----------------------------------------------------------------
+
+
+def _optional_phone(v: object) -> str | None:
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    return _phone(v)
+
+
+class WalkInIn(_Body):
+    name: PatientName
+    phone: Annotated[str | None, BeforeValidator(_optional_phone)] = None
+    age: Age
+    gender: Gender
+    visit_type: VisitType = Field("NEW", alias="visitType")
+
+
+class BookingStatusIn(_Body):
+    status: Literal["DONE", "SENT_FOR_TESTS", "NO_SHOW"]

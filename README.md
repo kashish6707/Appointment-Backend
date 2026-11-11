@@ -1,7 +1,7 @@
 # Clinically backend
 
-API for Clinically, a doctor appointment and OPD-queue app for Patna. So far it covers doctor
-registration and sign-in sessions only.
+API for Clinically, a doctor appointment and OPD-queue app for Patna. Built so far: doctor
+registration, sign-in sessions, the full data model and `GET /api/doctor/me`.
 
 FastAPI · PostgreSQL 16 · SQLAlchemy 2 · Alembic · argon2id
 
@@ -16,8 +16,17 @@ cp .env.example .env
 
 docker compose up -d
 alembic upgrade head
+python -m scripts.seed          # optional demo data, see below
 uvicorn app.main:app --port 4000
 ```
+
+### Demo data
+
+`python -m scripts.seed` adds Dr. Rajeev Anand (Orthopaedics) at Anand Ortho Care, Kankarbagh, with
+today's OPD session (today in Asia/Kolkata) and 12 bookings in mixed states. It prints the sign-in
+details (phone `9801234567`, password `demo1234`) and one patient tracking code. Running it again
+does nothing; `python -m scripts.seed --reset` **empties every table** first, so only use it on a
+dev database.
 
 Run the tests with `pytest`. They use a separate database (`TEST_DATABASE_URL`, by default
 `clinically_test` on the same server). It is created and migrated automatically, and the tables are
@@ -83,6 +92,13 @@ Every attempt is recorded in `login_attempts`, including ones refused with 429.
 - Always **204**, with `Set-Cookie: clinically_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`.
   Send `Content-Type: application/json`, since this is a POST like the others.
 
+### `GET /api/doctor/me`
+- **200** `{ "doctor": { "id", "fullName", "phone", "email", "department", "qualification",
+  "experienceYears", "registrationNo", "verified", "clinics": [{ "doctorClinicId", "clinicId",
+  "name", "area", "address", "phone", "fee", "opdDays", "opdStart", "opdEnd" }] } }`.
+  `fee` is in whole rupees; `opdStart`/`opdEnd` are `HH:MM` Asia/Kolkata times.
+- **401** `Please sign in.`
+
 ### `GET /api/health`
 - **200** `{ "status": "ok" }` after `SELECT 1`, or **503** if the database is unreachable
 
@@ -117,10 +133,14 @@ curl -i -b cookies.txt localhost:4000/api/auth/me
 app/main.py          app, error handlers, JSON-only POST guard, /api/health
 app/config.py        settings
 app/db.py            engine and session dependency
-app/models.py        doctors, sessions, login_attempts
+app/models.py        all tables
 app/schemas.py       request bodies and validation messages
 app/security.py      argon2, session tokens, cookie headers
+app/deps.py          signed-in doctor dependency
+app/timeutil.py      Asia/Kolkata dates
 app/routers/auth.py  register, login, me, logout
+app/routers/doctor.py  doctor-side endpoints
+scripts/seed.py      demo data
 alembic/             migrations
 tests/               pytest suite (uses a separate database)
 ```

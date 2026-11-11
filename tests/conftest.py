@@ -17,6 +17,7 @@ from sqlalchemy import create_engine, text  # noqa: E402
 
 from app.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models import Base  # noqa: E402
 
 
 def _create_test_database() -> None:
@@ -42,8 +43,9 @@ def database():
 
 @pytest.fixture(autouse=True)
 def clean_tables():
+    tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE doctors, sessions, login_attempts RESTART IDENTITY CASCADE"))
+        conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
     yield
 
 

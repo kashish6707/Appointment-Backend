@@ -7,7 +7,7 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.db import engine
-from app.routers import auth
+from app.routers import auth, doctor
 from app.schemas import FIELD_MSGS, METHOD_MSG
 
 log = logging.getLogger("clinically")
@@ -16,6 +16,7 @@ log = logging.getLogger("clinically")
 # which forwards /api/* here unchanged.
 app = FastAPI(title="Clinically API", docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth.router)
+app.include_router(doctor.router)
 
 
 def error(status: int, message: str) -> JSONResponse:

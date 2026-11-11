@@ -50,3 +50,8 @@ def session_cookie(token: str) -> str:
 
 def cleared_cookie() -> str:
     return _cookie("", 0)
+
+
+def new_tracking_code() -> str:
+    """Given to a patient once at booking; only its SHA-256 (hash_token) is stored."""
+    return secrets.token_urlsafe(16)

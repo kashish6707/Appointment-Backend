@@ -1,26 +1,23 @@
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Body, HTTPException, Request, Response
 from psycopg.errors import UniqueViolation
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from app import security
 from app.config import get_settings
-from app.db import get_db
+from app.deps import CurrentDoctor, Db
 from app.models import Doctor, LoginAttempt, Session
 from app.schemas import LoginBody, LoginPhone, RegisterBody, RegisterPhone
 
 router = APIRouter(prefix="/api/auth")
 
-Db = Annotated[DbSession, Depends(get_db)]
-
 DUPLICATE_MSG = "An account with this phone number or email already exists. Sign in instead."
 BAD_LOGIN_MSG = "That mobile number, email or password is wrong. Check and try again."
 TOO_MANY_MSG = "Too many attempts. Wait a few minutes and try again."
-SIGN_IN_MSG = "Please sign in."
 
 RATE_WINDOW = timedelta(minutes=15)
 MAX_FAILS_PER_IDENTIFIER = 5
@@ -107,26 +104,8 @@ def login(body: Annotated[LoginBody, Body(discriminator="method")], request: Req
 
 
 @router.get("/me")
-def me(request: Request, db: Db):
-    token = request.cookies.get(security.COOKIE_NAME)
-    if not token:
-        raise HTTPException(401, SIGN_IN_MSG)
-
-    row = db.execute(
-        select(Session.id, Session.expires_at, Doctor.id, Doctor.full_name)
-        .join(Doctor, Doctor.id == Session.doctor_id)
-        .where(Session.token_hash == security.hash_token(token))
-    ).first()
-    if row is None:
-        raise HTTPException(401, SIGN_IN_MSG)
-
-    session_id, expires_at, doctor_id, full_name = row
-    if expires_at <= datetime.now(timezone.utc):
-        db.execute(delete(Session).where(Session.id == session_id))
-        db.commit()
-        raise HTTPException(401, SIGN_IN_MSG)
-
-    return _doctor_json(doctor_id, full_name)
+def me(doctor: CurrentDoctor):
+    return _doctor_json(doctor.id, doctor.full_name)
 
 
 @router.post("/logout", status_code=204)

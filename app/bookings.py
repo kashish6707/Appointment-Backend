@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session as DbSession
 from sqlalchemy.orm import joinedload
 
-from app import security
+from app import schedule, security
 from app.models import WEEKDAYS, Booking, Doctor, DoctorClinic, OpdSession, Patient
 from app.timeutil import IST, now_ist
 
@@ -32,14 +32,28 @@ def get_bookable_slot(db: DbSession, doctor_clinic_id: uuid.UUID) -> DoctorClini
     return dc
 
 
-def check_bookable_date(dc: DoctorClinic, day: date, now: datetime | None = None) -> None:
+NOT_AVAILABLE_MSG = "The doctor doesn't hold OPD at this clinic on that day. Choose another day."
+FULL_MSG = "All tokens for that day are booked. Choose another day."
+
+
+class LimitReached(HTTPException):
+    """The day's patient limit is reached. The body also carries code/limit/booked, so the desk
+    can ask "add anyway?" for a walk-in."""
+
+    def __init__(self, message: str, limit: int, booked: int):
+        super().__init__(409, message)
+        self.extra = {"code": "LIMIT_REACHED", "limit": limit, "booked": booked}
+
+
+def check_bookable_date(db: DbSession, dc: DoctorClinic, day: date, now: datetime | None = None) -> None:
     now = now or now_ist()
     today = now.date()
     if day < today or day > today + timedelta(days=MAX_DAYS_AHEAD):
         raise HTTPException(400, f"You can book for today or up to {MAX_DAYS_AHEAD} days ahead.")
-    if WEEKDAYS[day.weekday()] not in dc.opd_days:
-        raise HTTPException(400, "The doctor doesn't hold OPD at this clinic on that day. Choose another day.")
-    if day == today and now.time() >= dc.opd_end:
+    plan = schedule.day_plan(db, dc, day)
+    if not plan.open:
+        raise HTTPException(400, NOT_AVAILABLE_MSG)
+    if day == today and now.time() >= plan.end:
         raise HTTPException(400, "Today's OPD hours are over. Choose another day.")
 
 
@@ -125,6 +139,7 @@ def add_booking(
     source: str,
     booking_id: uuid.UUID | None = None,
     tracking_code_hash: str | None = None,
+    allow_over_limit: bool = False,
 ) -> tuple[Booking, str | None]:
     """Give the patient the next token. The caller must hold the session lock (lock_session).
 
@@ -133,9 +148,20 @@ def add_booking(
     """
     if session.status == "CLOSED":
         raise HTTPException(409, CLOSED_MSG)
+    plan = schedule.day_plan(db, session.doctor_clinic, session.date)
+    if not plan.open:
+        raise HTTPException(409, "The doctor isn't available on this day.")
     already = active_token(db, session.id, patient.id)
     if already is not None:
         raise HTTPException(409, f"{patient.name} already has token {already} for this OPD session.")
+    if plan.limit is not None and not allow_over_limit:
+        booked = schedule.booked_count(db, session.id)
+        if booked >= plan.limit:
+            raise LimitReached(
+                FULL_MSG if source == "ONLINE" else f"The limit of {plan.limit} patients for this day is reached.",
+                plan.limit,
+                booked,
+            )
 
     code = None
     if tracking_code_hash is None:
@@ -166,6 +192,9 @@ def precheck_online_booking(db: DbSession, dc: DoctorClinic, day: date, name: st
         return
     if session.status == "CLOSED":
         raise HTTPException(409, CLOSED_MSG)
+    plan = schedule.day_plan(db, dc, day)
+    if plan.limit is not None and schedule.booked_count(db, session.id) >= plan.limit:
+        raise HTTPException(409, FULL_MSG)
     patient = db.scalar(
         select(Patient)
         .where(Patient.phone == phone, func.lower(Patient.name) == name.lower())
@@ -207,13 +236,19 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
     dc = session.doctor_clinic
     ahead = 0
     estimate = None
+    expected_at = None
+    plan = schedule.day_plan(db, dc, session.date)
     if booking.status == "WAITING" and session.status != "CLOSED":
         ahead = db.scalar(
             select(func.count()).where(
                 Booking.session_id == session.id, Booking.status == "WAITING", Booking.token < booking.token
             )
         )
-        estimate = round(ahead * average_consult_minutes(db, session.id))
+        average = average_consult_minutes(db, session.id)
+        estimate = round(ahead * average)
+        if session.status == "NOT_STARTED":
+            # Before OPD starts: when to arrive, from the day's hours and patient limit.
+            expected_at = schedule.expected_time(plan, ahead, average)
     return {
         "bookingId": str(booking.id),
         "token": booking.token,
@@ -222,9 +257,13 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
         "patientsAhead": ahead,
         "estimatedMinutes": estimate,
         "sessionStatus": session.status,
+        "sessionStartedAt": session.started_at.isoformat() if session.started_at else None,
         "sessionId": str(session.id),
         "date": session.date.isoformat(),
         "doctorName": dc.doctor.full_name,
         "clinicName": dc.clinic.name,
-        "opdStart": dc.opd_start.strftime("%H:%M"),
+        "opdStart": schedule.hhmm(plan.start) or dc.opd_start.strftime("%H:%M"),
+        "opdEnd": schedule.hhmm(plan.end) or dc.opd_end.strftime("%H:%M"),
+        "expectedAt": expected_at,
+        "dayNote": plan.note,
     }

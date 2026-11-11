@@ -1,3 +1,4 @@
+from tests.conftest import profile_body
 from sqlalchemy import text
 
 PHONE = "9876543210"
@@ -6,7 +7,7 @@ BAD_LOGIN = {"message": "That mobile number, email or password is wrong. Check a
 
 
 def register(client, **overrides):
-    body = {"fullName": "Dr Anjali Singh", "method": "phone", "phone": PHONE, "password": PASSWORD}
+    body = {"fullName": "Dr Anjali Singh", "method": "phone", "phone": PHONE, "password": PASSWORD, "profile": profile_body()}
     body.update(overrides)
     return client.post("/api/auth/doctor/register", json=body)
 
@@ -50,7 +51,7 @@ def test_register_by_phone_then_duplicate(client):
 def test_register_email_is_lowercased(client, db):
     r = client.post(
         "/api/auth/doctor/register",
-        json={"fullName": "Dr Ravi Kumar", "method": "email", "email": "  Ravi.Kumar@Example.COM ", "password": PASSWORD},
+        json={"fullName": "Dr Ravi Kumar", "method": "email", "email": "  Ravi.Kumar@Example.COM ", "password": PASSWORD, "profile": profile_body()},
     )
     assert r.status_code == 201
     stored = db.scalar(text("SELECT email FROM doctors"))
@@ -59,7 +60,7 @@ def test_register_email_is_lowercased(client, db):
     # Same address in different case is a duplicate.
     r = client.post(
         "/api/auth/doctor/register",
-        json={"fullName": "Dr Ravi Kumar", "method": "email", "email": "RAVI.KUMAR@example.com", "password": PASSWORD},
+        json={"fullName": "Dr Ravi Kumar", "method": "email", "email": "RAVI.KUMAR@example.com", "password": PASSWORD, "profile": profile_body()},
     )
     assert r.status_code == 409
 
@@ -84,7 +85,7 @@ def test_register_validation(client):
         ({"extra": "x"}, "Unexpected field"),
     ]
     for overrides, expected in cases:
-        body = {"fullName": "Dr Anjali Singh", "method": "phone", "phone": PHONE, "password": PASSWORD}
+        body = {"fullName": "Dr Anjali Singh", "method": "phone", "phone": PHONE, "password": PASSWORD, "profile": profile_body()}
         body.update(overrides)
         body = {k: v for k, v in body.items() if v is not None}
         if body["method"] == "email":
@@ -96,7 +97,7 @@ def test_register_validation(client):
         if expected:
             assert expected in data["message"], (overrides, data)
 
-    r = client.post("/api/auth/doctor/register", json={"fullName": "Dr X Y", "method": "email", "email": "a@b", "password": PASSWORD})
+    r = client.post("/api/auth/doctor/register", json={"fullName": "Dr X Y", "method": "email", "email": "a@b", "password": PASSWORD, "profile": profile_body()})
     assert r.status_code == 400
     assert r.json() == {"message": "Enter a valid email address, like name@example.com."}
 
@@ -149,7 +150,7 @@ def test_login_success_sets_session_cookie(client):
 def test_login_by_email_is_case_insensitive(client):
     client.post(
         "/api/auth/doctor/register",
-        json={"fullName": "Dr Ravi Kumar", "method": "email", "email": "ravi@example.com", "password": PASSWORD},
+        json={"fullName": "Dr Ravi Kumar", "method": "email", "email": "ravi@example.com", "password": PASSWORD, "profile": profile_body()},
     )
     r = client.post(
         "/api/auth/doctor/login", json={"method": "email", "email": "Ravi@Example.com", "password": PASSWORD}

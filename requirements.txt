@@ -7,3 +7,5 @@ argon2-cffi==23.1.0
 pydantic-settings==2.9.1
 httpx==0.28.1
 pydantic==2.14.3
+python-socketio==5.11.4
+python-engineio==4.10.1

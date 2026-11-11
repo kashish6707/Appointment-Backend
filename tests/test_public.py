@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta
 
 import pytest
+
+from app.db import SessionLocal
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -154,10 +156,11 @@ def test_cannot_book_today_after_opd_hours(make_slot):
     slot = make_slot(start=time(10, 0), end=time(14, 0))
     today = today_ist()
     evening = datetime.combine(today, time(14, 30), tzinfo=IST)
-    with pytest.raises(HTTPException) as exc:
-        bookings.check_bookable_date(slot, today, evening)
-    assert exc.value.status_code == 400
-    bookings.check_bookable_date(slot, today, datetime.combine(today, time(13, 0), tzinfo=IST))
+    with SessionLocal() as s:
+        with pytest.raises(HTTPException) as exc:
+            bookings.check_bookable_date(s, slot, today, evening)
+        assert exc.value.status_code == 400
+        bookings.check_bookable_date(s, slot, today, datetime.combine(today, time(13, 0), tzinfo=IST))
 
 
 def test_cannot_book_closed_session_or_unverified_doctor(client, make_slot, db):

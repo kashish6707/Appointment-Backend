@@ -9,6 +9,7 @@ TEST_DATABASE_URL = os.environ.get(
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["PAYMENT_GATEWAY"] = "fake"
+os.environ["NOTIFY_CHANNEL"] = "fake"
 
 import pytest  # noqa: E402
 from alembic import command  # noqa: E402
@@ -119,3 +120,31 @@ def gateway():
     _fake.fail_refunds = False
     yield _fake
     _fake.fail_refunds = False
+
+
+@pytest.fixture(autouse=True)
+def media_dir(tmp_path, monkeypatch):
+    """Doctor photos written by tests go to a temporary folder."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "media_dir", str(tmp_path / "media"))
+    return tmp_path / "media"
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 2000  # passes the photo check (JPEG header, over 1 KB)
+
+
+def profile_body(**overrides) -> dict:
+    """A complete doctor profile, as registration requires."""
+    import base64
+
+    return {
+        "specialisation": "Orthopaedics",
+        "experienceYears": 12,
+        "degrees": [{"level": "UG", "name": "MBBS", "institute": "PMCH Patna", "year": 2008},
+                    {"level": "PG", "name": "MS (Orthopaedics)"}],
+        "fee": 500,
+        "registrationNo": "BMC-12345",
+        "photo": "data:image/jpeg;base64," + base64.b64encode(JPEG).decode(),
+        **overrides,
+    }

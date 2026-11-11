@@ -1,5 +1,7 @@
 from sqlalchemy import text
 
+from tests.conftest import profile_body
+
 from scripts import seed
 
 
@@ -39,7 +41,7 @@ def test_doctor_me_includes_profile_and_clinics(client):
 def test_doctor_me_with_no_clinics_yet(client):
     client.post(
         "/api/auth/doctor/register",
-        json={"fullName": "Dr New Doctor", "method": "phone", "phone": "9123456780", "password": "secret123"},
+        json={"fullName": "Dr New Doctor", "method": "phone", "phone": "9123456780", "password": "secret123", "profile": profile_body()},
     )
     r = client.get("/api/doctor/me", headers=sign_in(client, "9123456780", "secret123"))
     assert r.status_code == 200

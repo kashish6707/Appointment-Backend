@@ -1,32 +1,68 @@
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
+import socketio
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import notifications, realtime
 from app.db import engine
-from app.routers import auth, doctor, payments, public, queue
+from app.routers import auth, dashboard, doctor, payments, profile, public, queue, schedule, staff
 from app.schemas import FIELD_MSGS, METHOD_MSG
 
 log = logging.getLogger("clinically")
+# Show the app's own info lines (e.g. messages to patients while NOTIFY_CHANNEL=log) next to
+# uvicorn's. Uvicorn only sets up its own loggers.
+if not log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+    log.addHandler(_handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+
+async def _retry_messages_forever(every_seconds: int = 60) -> None:
+    """Send messages left over: provider failures waiting to retry, or a crash before sending."""
+    while True:
+        await asyncio.sleep(every_seconds)
+        try:
+            await asyncio.to_thread(notifications.deliver_due)
+        except Exception:
+            log.exception("Retrying messages failed")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stop_realtime = realtime.start()
+    retry = asyncio.create_task(_retry_messages_forever())
+    yield
+    retry.cancel()
+    stop_realtime()
+
 
 # No CORS middleware on purpose: the browser only ever talks to the Next.js server,
 # which forwards /api/* here unchanged.
-app = FastAPI(title="Clinically API", docs_url=None, redoc_url=None, openapi_url=None)
-app.include_router(auth.router)
-app.include_router(doctor.router)
-app.include_router(public.router)
-app.include_router(payments.router)
-app.include_router(queue.router)
+api = FastAPI(title="Clinically API", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+api.include_router(auth.router)
+api.include_router(doctor.router)
+api.include_router(dashboard.router)
+api.include_router(public.router)
+api.include_router(payments.router)
+api.include_router(queue.router)
+api.include_router(staff.router)
+api.include_router(schedule.router)
+api.include_router(profile.router)
 
 
 def error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"message": message}, status_code=status)
 
 
-@app.middleware("http")
+@api.middleware("http")
 async def require_json_posts(request: Request, call_next):
     # With SameSite=Lax this stops other sites from posting HTML forms to the API.
     if request.method == "POST":
@@ -59,7 +95,7 @@ def _validation_message(errors: list[dict]) -> str:
     return "Send the request body as a JSON object."
 
 
-@app.exception_handler(RequestValidationError)
+@api.exception_handler(RequestValidationError)
 async def on_validation_error(request: Request, exc: RequestValidationError):
     errors = exc.errors()
     if errors and errors[0]["loc"][0] == "path":  # e.g. a malformed id in the URL
@@ -67,21 +103,24 @@ async def on_validation_error(request: Request, exc: RequestValidationError):
     return error(400, _validation_message(errors))
 
 
-@app.exception_handler(StarletteHTTPException)
+@api.exception_handler(StarletteHTTPException)
 async def on_http_error(request: Request, exc: StarletteHTTPException):
     response = error(exc.status_code, str(exc.detail))
+    extra = getattr(exc, "extra", None)  # e.g. LimitReached: code, limit, booked
+    if extra:
+        response = JSONResponse({"message": str(exc.detail), **extra}, status_code=exc.status_code)
     for key, value in (exc.headers or {}).items():
         response.headers[key] = value
     return response
 
 
-@app.exception_handler(Exception)
+@api.exception_handler(Exception)
 async def on_unexpected_error(request: Request, exc: Exception):
     log.exception("Unhandled error on %s %s", request.method, request.url.path)
     return error(500, "Something went wrong on our side. Try again in a moment.")
 
 
-@app.get("/api/health")
+@api.get("/api/health")
 def health():
     try:
         with engine.connect() as conn:
@@ -90,3 +129,7 @@ def health():
         log.exception("Health check failed")
         return error(503, "The database is unavailable.")
     return {"status": "ok"}
+
+
+# What uvicorn runs: Socket.IO handles /api/socket.io/ (live updates), FastAPI everything else.
+app = socketio.ASGIApp(realtime.sio, other_asgi_app=api, socketio_path="api/socket.io")

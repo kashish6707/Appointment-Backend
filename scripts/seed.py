@@ -29,10 +29,10 @@ DEMO_PASSWORD = "demo1234"
 
 # (name, phone, age, gender, visit type, source, status, consent)
 PATIENTS = [
-    ("Ramesh Kumar", "9431012345", 54, "MALE", "FOLLOW_UP", "ONLINE", "DONE", True),
-    ("Sunita Devi", "9934123456", 47, "FEMALE", "NEW", "ONLINE", "DONE", False),
-    ("Amit Singh", "9572234567", 32, "MALE", "NEW", "WALK_IN", "SENT_FOR_TESTS", True),
-    ("Priya Kumari", "9835345678", 26, "FEMALE", "REPORT_REVIEW", "ONLINE", "WITH_DOCTOR", True),
+    ("Ramesh Kumar", "9431012345", 54, "MALE", "FOLLOW_UP", "ONLINE", "WAITING", True),
+    ("Sunita Devi", "9934123456", 47, "FEMALE", "NEW", "ONLINE", "WAITING", False),
+    ("Amit Singh", "9572234567", 32, "MALE", "NEW", "WALK_IN", "WAITING", True),
+    ("Priya Kumari", "9835345678", 26, "FEMALE", "REPORT_REVIEW", "ONLINE", "WAITING", True),
     ("Manoj Yadav", "9122456789", 61, "MALE", "FOLLOW_UP", "ONLINE", "WAITING", True),
     ("Anjali Sinha", "9709567890", 38, "FEMALE", "NEW", "ONLINE", "WAITING", False),
     ("Vikash Prasad", None, 45, "MALE", "NEW", "WALK_IN", "WAITING", False),
@@ -82,13 +82,8 @@ def main() -> None:
         )
         today = today_ist()
         opd_start = datetime.combine(today, time(10, 0), tzinfo=IST)
-        session = OpdSession(
-            doctor_clinic=doctor_clinic,
-            date=today,
-            status="IN_OPD",
-            started_at=opd_start + timedelta(minutes=5),
-            current_token=4,
-        )
+        # Today's OPD hasn't started: the doctor presses Start OPD, and booked patients are told.
+        session = OpdSession(doctor_clinic=doctor_clinic, date=today, status="NOT_STARTED")
         db.add_all([doctor, clinic, doctor_clinic, session])
 
         codes = {}

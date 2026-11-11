@@ -244,3 +244,88 @@ def test_walk_ins_only_today_and_not_after_closing(client, opd, make_slot, db):
         headers=opd["auth"],
     )
     assert r.status_code == 409 and "today's OPD" in r.json()["message"]
+
+
+def test_call_a_chosen_patient(client, opd, db, emitted):
+    ids = [r[0] for r in db.execute(text("SELECT id::text FROM bookings ORDER BY token")).all()]
+    db.commit()
+    call = lambda bid: client.post(f"/api/doctor/bookings/{bid}/call", headers=opd["auth"])  # noqa: E731
+    assert call(ids[2]).json() == {"message": "Start the OPD first."}
+    act(client, opd, "start")
+    act(client, opd, "next")  # token 1 with the doctor
+    r = call(ids[2])
+    assert r.status_code == 200
+    assert r.json()["current"]["token"] == 3 and r.json()["finished"]["token"] == 1
+    assert r.json()["session"]["currentToken"] == 3
+    assert statuses(db) == {1: "DONE", 2: "WAITING", 3: "WITH_DOCTOR"}
+    assert call(ids[0]).json() == {"message": "This patient isn't waiting."}
+    assert ("booking.updated" in [e for _, e, _ in emitted])
+
+
+def test_call_other_doctors_patient_is_not_found(client, opd, make_slot, db):
+    other = make_slot()
+    book(client, other, phone="9431099999")
+    bid = db.scalar(text("SELECT b.id::text FROM bookings b JOIN opd_sessions s ON s.id = b.session_id WHERE s.doctor_clinic_id = :dc"), {"dc": other.id})
+    db.commit()
+    act(client, opd, "start")
+    assert client.post(f"/api/doctor/bookings/{bid}/call", headers=opd["auth"]).status_code == 404
+
+
+# --- reopening an OPD ended by mistake -----------------------------------------------
+
+
+def test_reopen_after_end_restores_the_patient_with_the_doctor(client, opd, db, emitted):
+    act(client, opd, "start")
+    act(client, opd, "next")  # token 1 with the doctor
+    ended = act(client, opd, "end").json()["session"]
+    assert ended["status"] == "CLOSED" and ended["closedAt"] is not None
+    assert statuses(db)[1] == "DONE"
+
+    r = act(client, opd, "reopen")
+    assert r.status_code == 200
+    assert r.json()["session"]["status"] == "IN_OPD"
+    assert r.json()["session"]["closedAt"] is None
+    assert r.json()["session"]["currentToken"] == 1
+    assert [b["token"] for b in r.json()["restored"]] == [1]
+    assert statuses(db) == {1: "WITH_DOCTOR", 2: "WAITING", 3: "WAITING"}
+    assert db.scalar(text("SELECT completed_at FROM bookings WHERE token = 1")) is None
+    assert ("booking.updated" in [e for _, e, _ in emitted])
+
+    # The queue carries on as before.
+    assert act(client, opd, "next").json()["current"]["token"] == 2
+    assert act(client, opd, "reopen").json() == {"message": "OPD isn't closed."}
+
+
+def test_reopen_does_not_undo_changes_made_after_ending(client, opd, db):
+    act(client, opd, "start")
+    current = act(client, opd, "next").json()["current"]
+    act(client, opd, "end")
+    client.patch(f"/api/doctor/bookings/{current['id']}/status", headers=opd["auth"], json={"status": "SENT_FOR_TESTS"})
+    r = act(client, opd, "reopen")
+    assert r.json()["restored"] == []
+    assert statuses(db)[1] == "SENT_FOR_TESTS"
+
+
+def test_reopen_before_starting_goes_back_to_not_started(client, opd):
+    act(client, opd, "end")
+    assert act(client, opd, "reopen").json()["session"]["status"] == "NOT_STARTED"
+
+
+def test_reopen_a_closed_coming_day_takes_bookings_again(client, make_slot, db):
+    slot = make_slot()
+    day = today_ist() + timedelta(days=1)
+    book(client, slot, day=day)
+    session = db.scalar(text("SELECT id::text FROM opd_sessions"))
+    db.commit()
+    auth = {**J, **sign_in(client, slot.doctor.phone, "secret123")}
+    client.post(f"/api/doctor/sessions/{session}/end", headers=auth)
+    assert book(client, slot, phone="9431000009", day=day).status_code == 409
+    assert client.post(f"/api/doctor/sessions/{session}/reopen", headers=auth).status_code == 200
+    assert book(client, slot, phone="9431000009", day=day).status_code == 201
+
+
+def test_past_day_cannot_be_reopened(client, opd, db):
+    with db.begin():
+        db.execute(text("UPDATE opd_sessions SET status = 'CLOSED', date = date - 1"))
+    r = act(client, opd, "reopen")
+    assert r.status_code == 409 and r.json() == {"message": "You can only reopen today's OPD or a coming day."}

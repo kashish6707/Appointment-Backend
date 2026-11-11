@@ -2,12 +2,13 @@
 
 import hmac
 import uuid
+from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import joinedload
 
-from app import booking_payments, bookings, notify, security
+from app import booking_payments, bookings, notifications, notify, profile, schedule, security
 from app.deps import Db
 from app.models import Booking, Clinic, Doctor, DoctorClinic, OpdSession, Payment
 from app.payments import get_gateway
@@ -34,8 +35,7 @@ def _doctor_profile(d: Doctor) -> dict:
         "id": str(d.id),
         "fullName": d.full_name,
         "department": d.department,
-        "qualification": d.qualification,
-        "experienceYears": d.experience_years,
+        **profile.public_json(d),
     }
 
 
@@ -119,7 +119,7 @@ def _rupees(paise: int) -> int:
 @router.post("/bookings", status_code=201)
 def create_booking(body: BookingIn, db: Db):
     dc = bookings.get_bookable_slot(db, body.doctor_clinic_id)
-    bookings.check_bookable_date(dc, body.date, now_ist())
+    bookings.check_bookable_date(db, dc, body.date, now_ist())
 
     if dc.token_amount > 0:
         # Pay first; the token is assigned when the payment is confirmed.
@@ -215,6 +215,8 @@ def booking_status(booking_id: uuid.UUID, db: Db, code: str = ""):
     return {
         **bookings.queue_status(db, booking),
         "payment": booking_payments.summary(payment, booking.session.doctor_clinic.fee),
+        # Messages sent to the patient about this booking, e.g. "OPD has started".
+        "messages": notifications.for_booking(db, booking.id),
     }
 
 
@@ -254,3 +256,39 @@ def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db):
         booking_payments.refund(db, payment)
         refund = {"amount": _rupees(payment.amount_paise), "status": payment.status}
     return {"bookingId": str(booking.id), "status": booking.status, "refund": refund}
+
+
+@router.get("/clinics/{doctor_clinic_id}/availability")
+def availability(doctor_clinic_id: uuid.UUID, db: Db):
+    """The days patients can book at this doctor's clinic, today and the next days.
+
+    Each day: open or not, hours, the daily limit, tokens booked and left, whether it can be
+    booked now, and the doctor's note for a changed day (e.g. "At a conference").
+    """
+    dc = bookings.get_bookable_slot(db, doctor_clinic_id)
+    now = now_ist()
+    today = now.date()
+    last = today + timedelta(days=bookings.MAX_DAYS_AHEAD)
+    plans = schedule.plans(db, dc, today, last)
+    booked = schedule.booked_by_date(db, dc, today, last)
+    closed_sessions = set(
+        db.scalars(
+            select(OpdSession.date).where(
+                OpdSession.doctor_clinic_id == dc.id, OpdSession.date.between(today, last), OpdSession.status == "CLOSED"
+            )
+        )
+    )
+    days = []
+    for day, plan in plans.items():
+        n = booked.get(day, 0)
+        left = None if plan.limit is None else max(plan.limit - n, 0)
+        if not plan.open or day in closed_sessions:
+            reason = "NOT_AVAILABLE"
+        elif day == today and now.time() >= plan.end:
+            reason = "HOURS_OVER"
+        elif left == 0:
+            reason = "FULL"
+        else:
+            reason = None
+        days.append({**plan.json(), "booked": n, "left": left, "bookable": reason is None, "reason": reason})
+    return {"doctorClinicId": str(dc.id), "days": days}

@@ -2,7 +2,8 @@
 
 API for Clinically, a doctor appointment and OPD-queue app for Patna. Built so far: doctor
 registration, sign-in sessions, the full data model, `GET /api/doctor/me`, and the patient-facing
-doctor listing, booking, booking status and cancellation.
+doctor listing, booking with an online token-amount payment (Razorpay), booking status and
+cancellation with refunds.
 
 FastAPI · PostgreSQL 16 · SQLAlchemy 2 · Alembic · argon2id
 
@@ -40,6 +41,9 @@ emptied before each test.
 | `DATABASE_URL`     | `postgresql+psycopg://clinically:…/clinically` | Use the `postgresql+psycopg://` scheme |
 | `COOKIE_SECURE`    | `false`                                   | Set to `true` in production (HTTPS)       |
 | `SESSION_TTL_DAYS` | `30`                                      |                                           |
+| `PAYMENT_GATEWAY`  | `razorpay`                                | `fake` for local dev and tests (no keys)  |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` |                     | From the Razorpay dashboard (API keys)    |
+| `RAZORPAY_WEBHOOK_SECRET` |                                    | Secret you set on the webhook             |
 
 ## How requests arrive
 
@@ -116,11 +120,41 @@ fee, opdDays, opdStart, opdEnd} }`. `search` matches doctor name, department, cl
 `{ id, fullName, department, qualification, experienceYears, clinics: [{ …clinic, waitingToday,
 todaySessionStatus, nowServing }] }`
 
+#### Online token amount
+
+Each doctor-clinic slot has a `tokenAmount` (whole rupees, between 0 and `fee`). The patient pays it
+online when booking; reception collects `fee - tokenAmount`. With `tokenAmount: 0` a booking is
+confirmed straight away with no payment. This is also what stops fake bookings: every token costs
+money.
+
+Flow for a paid slot:
+1. `POST /api/public/bookings` checks everything first (doctor, date, closed session, duplicate
+   token), then creates a Razorpay order and returns
+   `{ bookingId, token: null, trackingCode, payment: { orderId, amount (paise), currency, keyId } }`.
+   **No token, patient record or consent change is made yet**, so an unpaid attempt changes nothing.
+2. The frontend opens Razorpay Checkout with `payment`, then posts the success result to
+   `POST /api/public/bookings/:id/payment`.
+3. Razorpay's webhook confirms it as well (in case the patient closes the page first). Either path
+   creates the booking and assigns the token, exactly once.
+4. If the booking can't be made after paying (the session closed meanwhile, or the patient already
+   holds a token), the money is refunded automatically.
+
+Refunds: a patient who cancels **before that day's OPD starts** gets the token amount back
+automatically. After OPD starts, or for a no-show, there's no refund. If Razorpay refuses a refund,
+the payment is marked `REFUND_FAILED` (with the reason in `payments.note`) for the clinic to retry
+from the Razorpay dashboard.
+
+Razorpay setup: enable **automatic capture** for payments, and add a webhook pointing at
+`https://<your site>/api/payments/razorpay/webhook` for the `payment.captured` and `order.paid`
+events, with the same secret as `RAZORPAY_WEBHOOK_SECRET`.
+
 #### `POST /api/public/bookings`
 Body: `{ doctorClinicId, date: "YYYY-MM-DD", visitType: NEW|FOLLOW_UP|REPORT_REVIEW,
 patient: { name, phone, age, gender: MALE|FEMALE|OTHER, heightCm?, weightKg? }, recordsConsent }`
 
-- **201** `{ bookingId, token, trackingCode }`
+- **201** `{ bookingId, token, trackingCode, payment }`. `token` is `null` and `payment` holds the
+  Checkout details when a token amount is due; otherwise `payment` is `null`.
+- **502** if Razorpay couldn't create the order
 - **400** for invalid input, a date outside today to 7 days ahead, a day the doctor has no OPD there,
   or today after OPD hours have ended
 - **404** if the doctor or clinic is unknown or unverified
@@ -134,15 +168,26 @@ Rules:
   earlier tests and records carry over. Height and weight update to the latest values.
   `recordsConsent: true` grants consent (keeping the first consent time); `false` withdraws it.
 
+#### `POST /api/public/bookings/:id/payment`
+Body: `{ code, razorpayOrderId, razorpayPaymentId, razorpaySignature }` (Checkout's success result).
+**200** `{ bookingId, token, status }`; **400** if the signature doesn't verify; **409** if it was
+paid but couldn't be booked (refund issued, reason in `message`).
+
+#### `POST /api/payments/razorpay/webhook`
+Called by Razorpay. Verified with `X-Razorpay-Signature`.
+
 #### `GET /api/public/bookings/:id?code=`
 `{ bookingId, token, status, nowServing, patientsAhead, estimatedMinutes, sessionStatus, sessionId,
-date, doctorName, clinicName, opdStart }`. `patientsAhead` counts WAITING tokens before this one.
+date, doctorName, clinicName, opdStart, payment: { fee, paidOnline, payAtReception, refundStatus } }`.
+Before payment, `status` is `PENDING_PAYMENT` (with `payment.checkout` to reopen Checkout),
+`PAYMENT_EXPIRED` after 15 minutes, `CANCELLED`, or `PAYMENT_REFUNDED`, and `token` is `null`. A
+late payment on an expired booking is still accepted. `patientsAhead` counts WAITING tokens before this one.
 `estimatedMinutes` = patients ahead × today's average consult time in this session (10 minutes
 until someone has been seen), and is `null` once the patient isn't waiting.
 
 #### `POST /api/public/bookings/:id/cancel`
-Body `{ code, reason? }`. **200** `{ bookingId, status: "CANCELLED" }`; **409** unless the booking is
-WAITING.
+Body `{ code, reason? }`. **200** `{ bookingId, status: "CANCELLED", refund: { amount, status } | null }`;
+**409** unless the booking is WAITING (or still unpaid).
 
 ### `GET /api/health`
 - **200** `{ "status": "ok" }` after `SELECT 1`, or **503** if the database is unreachable
@@ -187,6 +232,9 @@ app/routers/auth.py  register, login, me, logout
 app/routers/doctor.py  doctor-side endpoints
 app/routers/public.py  patient-facing endpoints
 app/bookings.py      booking rules (token locking, patient matching, queue estimates)
+app/booking_payments.py  token-amount payments, confirmation and refunds
+app/payments.py      Razorpay client and the fake gateway
+app/routers/payments.py  Razorpay webhook
 app/events.py        real-time event hub (Socket.IO plugs in here)
 app/serializers.py   shared JSON shapes
 scripts/seed.py      demo data

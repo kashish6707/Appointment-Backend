@@ -49,6 +49,9 @@ FIELD_MSGS = {
     "patient": "Add the patient's details.",
     "code": CODE_MSG,
     "reason": REASON_MSG,
+    "razorpayOrderId": "The payment details are incomplete. Please try again.",
+    "razorpayPaymentId": "The payment details are incomplete. Please try again.",
+    "razorpaySignature": "The payment details are incomplete. Please try again.",
 }
 
 MAX_PASSWORD = 128
@@ -213,3 +216,12 @@ class BookingIn(_Body):
 class CancelIn(_Body):
     code: str = Field(min_length=1, max_length=100)
     reason: Reason = None
+
+
+class PaymentConfirmIn(_Body):
+    """Razorpay Checkout's success handler result, plus the patient's tracking code."""
+
+    code: str = Field(min_length=1, max_length=100)
+    razorpay_order_id: str = Field(alias="razorpayOrderId", min_length=1, max_length=100)
+    razorpay_payment_id: str = Field(alias="razorpayPaymentId", min_length=1, max_length=100)
+    razorpay_signature: str = Field(alias="razorpaySignature", min_length=1, max_length=200)

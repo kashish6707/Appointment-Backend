@@ -19,6 +19,7 @@ from app.models import (
     DoctorClinic,
     OpdSession,
     Patient,
+    Payment,
     TestAdvice,
 )
 from app.timeutil import IST, now_ist, today_ist
@@ -74,6 +75,7 @@ def main() -> None:
             doctor=doctor,
             clinic=clinic,
             fee=500,
+            token_amount=50,
             opd_days=["MON", "TUE", "WED", "THU", "FRI", "SAT"],
             opd_start=time(10, 0),
             opd_end=time(14, 0),
@@ -118,6 +120,23 @@ def main() -> None:
                 booking.cancelled_by = "PATIENT"
                 booking.cancel_reason = "Not feeling well enough to travel"
             db.add_all([patient, booking])
+            if source == "ONLINE":
+                db.flush()
+                db.add(
+                    Payment(
+                        booking_id=booking.id,
+                        doctor_clinic=doctor_clinic,
+                        date=today,
+                        visit_type=visit,
+                        tracking_code_hash=booking.tracking_code_hash,
+                        amount_paise=doctor_clinic.token_amount * 100,
+                        gateway="fake",
+                        gateway_order_id=f"order_seed{token:04d}",
+                        gateway_payment_id=f"pay_seed{token:04d}",
+                        status="PAID",
+                        paid_at=booked_at,
+                    )
+                )
             if status == "SENT_FOR_TESTS":
                 db.flush()
                 for test in ("X-ray left knee AP/lateral", "Serum vitamin D"):

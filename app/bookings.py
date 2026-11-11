@@ -103,36 +103,79 @@ def find_or_create_patient(
     return patient
 
 
-def add_booking(
-    db: DbSession, session: OpdSession, patient: Patient, *, visit_type: str, source: str
-) -> tuple[Booking, str]:
-    """Give the patient the next token. The caller must hold the session lock (lock_session)."""
-    if session.status == "CLOSED":
-        raise HTTPException(409, "This OPD session is closed. Choose another day.")
-    already = db.scalar(
+CLOSED_MSG = "This OPD session is closed. Choose another day."
+
+
+def active_token(db: DbSession, session_id: uuid.UUID, patient_id: uuid.UUID) -> int | None:
+    return db.scalar(
         select(Booking.token).where(
-            Booking.session_id == session.id,
-            Booking.patient_id == patient.id,
+            Booking.session_id == session_id,
+            Booking.patient_id == patient_id,
             Booking.status.in_(ACTIVE_STATUSES),
         )
     )
+
+
+def add_booking(
+    db: DbSession,
+    session: OpdSession,
+    patient: Patient,
+    *,
+    visit_type: str,
+    source: str,
+    booking_id: uuid.UUID | None = None,
+    tracking_code_hash: str | None = None,
+) -> tuple[Booking, str | None]:
+    """Give the patient the next token. The caller must hold the session lock (lock_session).
+
+    Returns the booking and a new tracking code, or None for the code when the caller passed
+    tracking_code_hash (the patient already has their code from the payment step).
+    """
+    if session.status == "CLOSED":
+        raise HTTPException(409, CLOSED_MSG)
+    already = active_token(db, session.id, patient.id)
     if already is not None:
         raise HTTPException(409, f"{patient.name} already has token {already} for this OPD session.")
 
+    code = None
+    if tracking_code_hash is None:
+        code = security.new_tracking_code()
+        tracking_code_hash = security.hash_token(code)
     last_token = db.scalar(select(func.max(Booking.token)).where(Booking.session_id == session.id))
-    code = security.new_tracking_code()
     booking = Booking(
+        id=booking_id or uuid.uuid4(),
         session_id=session.id,
         token=(last_token or 0) + 1,
         patient=patient,
         visit_type=visit_type,
         source=source,
         status="WAITING",
-        tracking_code_hash=security.hash_token(code),
+        tracking_code_hash=tracking_code_hash,
     )
     db.add(booking)
     db.flush()
     return booking, code
+
+
+def precheck_online_booking(db: DbSession, dc: DoctorClinic, day: date, name: str, phone: str) -> None:
+    """Refuse before taking money if the booking would fail anyway (closed day, duplicate)."""
+    session = db.scalar(
+        select(OpdSession).where(OpdSession.doctor_clinic_id == dc.id, OpdSession.date == day)
+    )
+    if session is None:
+        return
+    if session.status == "CLOSED":
+        raise HTTPException(409, CLOSED_MSG)
+    patient = db.scalar(
+        select(Patient)
+        .where(Patient.phone == phone, func.lower(Patient.name) == name.lower())
+        .order_by(Patient.created_at)
+        .limit(1)
+    )
+    if patient is not None:
+        already = active_token(db, session.id, patient.id)
+        if already is not None:
+            raise HTTPException(409, f"{patient.name} already has token {already} for this OPD session.")
 
 
 def get_booking_by_code(db: DbSession, booking_id: uuid.UUID, code: str, *, lock: bool = False) -> Booking:

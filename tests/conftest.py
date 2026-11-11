@@ -8,6 +8,7 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql+psycopg://clinically:clinically@localhost:5432/clinically_test",
 )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+os.environ["PAYMENT_GATEWAY"] = "fake"
 
 import pytest  # noqa: E402
 from alembic import command  # noqa: E402
@@ -70,7 +71,9 @@ def make_slot():
     """Create a doctor sitting at a clinic. OPD runs all day, every day, unless overridden."""
     counter = iter(range(1, 1000))
 
-    def make(*, verified=True, days=WEEKDAYS, start=time(0, 0), end=time(23, 59), **doctor_fields):
+    def make(
+        *, verified=True, days=WEEKDAYS, start=time(0, 0), end=time(23, 59), token_amount=0, **doctor_fields
+    ):
         n = next(counter)
         with SessionLocal() as s:
             doctor = Doctor(
@@ -83,7 +86,13 @@ def make_slot():
             )
             clinic = Clinic(name=f"Test Clinic {n}", area="Boring Road", address=f"{n} Test Lane, Patna")
             slot = DoctorClinic(
-                doctor=doctor, clinic=clinic, fee=400, opd_days=list(days), opd_start=start, opd_end=end
+                doctor=doctor,
+                clinic=clinic,
+                fee=400,
+                token_amount=token_amount,
+                opd_days=list(days),
+                opd_start=start,
+                opd_end=end,
             )
             s.add_all([doctor, clinic, slot])
             s.commit()
@@ -99,3 +108,14 @@ def emitted():
     unsubscribe = events.subscribe(lambda room, event, payload: log.append((room, event, payload)))
     yield log
     unsubscribe()
+
+
+@pytest.fixture
+def gateway():
+    """The fake payment gateway, reset for each test."""
+    from app.payments import _fake
+
+    _fake.refunds.clear()
+    _fake.fail_refunds = False
+    yield _fake
+    _fake.fail_refunds = False

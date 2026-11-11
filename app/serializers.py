@@ -50,6 +50,7 @@ def clinic_slot(dc: DoctorClinic) -> dict:
         "address": dc.clinic.address,
         "phone": dc.clinic.phone,
         "fee": dc.fee,
+        "tokenAmount": dc.token_amount,
         "opdDays": dc.opd_days,
         "opdStart": dc.opd_start.strftime("%H:%M"),
         "opdEnd": dc.opd_end.strftime("%H:%M"),

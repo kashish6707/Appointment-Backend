@@ -1,15 +1,17 @@
 """Patient-facing routes. No login: a booking is protected by its tracking code."""
 
+import hmac
 import uuid
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import joinedload
 
-from app import bookings, events
+from app import booking_payments, bookings, events, security
 from app.deps import Db
-from app.models import Booking, Clinic, Doctor, DoctorClinic, OpdSession
-from app.schemas import BookingIn, CancelIn
+from app.models import Booking, Clinic, Doctor, DoctorClinic, OpdSession, Payment
+from app.payments import get_gateway
+from app.schemas import BookingIn, CancelIn, PaymentConfirmIn
 from app.serializers import booking_item, clinic_slot
 from app.timeutil import now_ist, today_ist
 
@@ -117,10 +119,29 @@ def notify_booking(booking: Booking, event: str, doctor_id: uuid.UUID) -> None:
     events.emit(f"session:{booking.session_id}", "session.updated", {"id": str(booking.session_id)})
 
 
+def _rupees(paise: int) -> int:
+    return paise // 100
+
+
 @router.post("/bookings", status_code=201)
 def create_booking(body: BookingIn, db: Db):
     dc = bookings.get_bookable_slot(db, body.doctor_clinic_id)
     bookings.check_bookable_date(dc, body.date, now_ist())
+
+    if dc.token_amount > 0:
+        # Pay first; the token is assigned when the payment is confirmed.
+        bookings.precheck_online_booking(db, dc, body.date, body.patient.name, body.patient.phone)
+        patient = body.patient.model_dump(by_alias=True, exclude_none=True)
+        payment, code = booking_payments.start(
+            db, dc, body.date, body.visit_type, patient, body.records_consent
+        )
+        return {
+            "bookingId": str(payment.booking_id),
+            "token": None,
+            "trackingCode": code,
+            "payment": booking_payments.checkout_json(payment),
+        }
+
     session = bookings.lock_session(db, dc.id, body.date)
     patient = bookings.find_or_create_patient(
         db,
@@ -135,19 +156,88 @@ def create_booking(body: BookingIn, db: Db):
     booking, code = bookings.add_booking(db, session, patient, visit_type=body.visit_type, source="ONLINE")
     db.commit()
     notify_booking(booking, "booking.created", dc.doctor_id)
-    return {"bookingId": str(booking.id), "token": booking.token, "trackingCode": code}
+    return {"bookingId": str(booking.id), "token": booking.token, "trackingCode": code, "payment": None}
+
+
+@router.post("/bookings/{booking_id}/payment")
+def confirm_payment(booking_id: uuid.UUID, body: PaymentConfirmIn, db: Db):
+    """Called by the frontend with Razorpay Checkout's success result."""
+    payment = booking_payments.lock_by_booking(db, booking_id, body.code)
+    if payment is None:
+        raise HTTPException(404, bookings.BOOKING_NOT_FOUND)
+    if payment.gateway_order_id != body.razorpay_order_id or not get_gateway().verify_checkout(
+        body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature
+    ):
+        raise HTTPException(
+            400,
+            "We couldn't verify this payment. If money was deducted, "
+            "it will be confirmed or refunded automatically.",
+        )
+    booking = booking_payments.confirm(db, payment, body.razorpay_payment_id)
+    if booking is None:
+        booking_payments.refund(db, payment)
+        raise HTTPException(
+            409,
+            f"We couldn't book this token: {payment.note} "
+            f"Your \u20b9{_rupees(payment.amount_paise)} will be refunded.",
+        )
+    notify_booking(booking, "booking.created", payment.doctor_clinic.doctor_id)
+    return {"bookingId": str(booking.id), "token": booking.token, "status": booking.status}
+
+
+def _pending_payment_status(db: Db, booking_id: uuid.UUID, code: str) -> dict:
+    """Status for a booking that is still waiting for (or failed) payment."""
+    payment = db.scalar(select(Payment).where(Payment.booking_id == booking_id))
+    if payment is None or not hmac.compare_digest(payment.tracking_code_hash, security.hash_token(code)):
+        raise HTTPException(404, bookings.BOOKING_NOT_FOUND)
+    dc = payment.doctor_clinic
+    status = booking_payments.pending_status(payment)
+    return {
+        "bookingId": str(booking_id),
+        "token": None,
+        "status": status,
+        "nowServing": None,
+        "patientsAhead": None,
+        "estimatedMinutes": None,
+        "sessionStatus": None,
+        "date": payment.date.isoformat(),
+        "doctorName": dc.doctor.full_name,
+        "clinicName": dc.clinic.name,
+        "opdStart": dc.opd_start.strftime("%H:%M"),
+        "payment": {
+            **booking_payments.summary(payment, dc.fee),
+            "checkout": booking_payments.checkout_json(payment) if status == "PENDING_PAYMENT" else None,
+        },
+    }
 
 
 @router.get("/bookings/{booking_id}")
 def booking_status(booking_id: uuid.UUID, db: Db, code: str = ""):
     if not code:
         raise HTTPException(400, "Add the tracking code from your booking link.")
+    if db.get(Booking, booking_id) is None:
+        return _pending_payment_status(db, booking_id, code)
     booking = bookings.get_booking_by_code(db, booking_id, code)
-    return bookings.queue_status(db, booking)
+    payment = db.scalar(select(Payment).where(Payment.booking_id == booking.id))
+    return {
+        **bookings.queue_status(db, booking),
+        "payment": booking_payments.summary(payment, booking.session.doctor_clinic.fee),
+    }
 
 
 @router.post("/bookings/{booking_id}/cancel")
 def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db):
+    if db.get(Booking, booking_id) is None:
+        # Not paid yet: cancel the pending payment so a late payment gets refunded, not booked.
+        payment = booking_payments.lock_by_booking(db, booking_id, body.code)
+        if payment is None:
+            raise HTTPException(404, bookings.BOOKING_NOT_FOUND)
+        if payment.status != "CREATED":
+            raise HTTPException(409, "This booking can't be cancelled now.")
+        payment.status = "CANCELLED"
+        db.commit()
+        return {"bookingId": str(booking_id), "status": "CANCELLED", "refund": None}
+
     booking = bookings.get_booking_by_code(db, booking_id, body.code, lock=True)
     if booking.status != "WAITING":
         raise HTTPException(409, "This booking can't be cancelled now.")
@@ -155,7 +245,19 @@ def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db):
     booking.cancelled_at = now_ist()
     booking.cancelled_by = "PATIENT"
     booking.cancel_reason = body.reason
-    doctor_id = booking.session.doctor_clinic.doctor_id
+    session = booking.session
+    doctor_id = session.doctor_clinic.doctor_id
+
+    # The token amount is refunded if the patient cancels before that day's OPD starts.
+    payment = db.scalar(select(Payment).where(Payment.booking_id == booking.id).with_for_update())
+    refundable = payment is not None and payment.status == "PAID" and session.status == "NOT_STARTED"
+    if refundable:
+        booking_payments.mark_for_refund(payment, "Cancelled by patient before OPD started")
     db.commit()
     notify_booking(booking, "booking.cancelled", doctor_id)
-    return {"bookingId": str(booking.id), "status": booking.status}
+
+    refund = None
+    if refundable:
+        booking_payments.refund(db, payment)
+        refund = {"amount": _rupees(payment.amount_paise), "status": payment.status}
+    return {"bookingId": str(booking.id), "status": booking.status, "refund": refund}

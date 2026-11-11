@@ -17,7 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Allowed values for the text "enum" columns. Stored as text + CHECK constraint so adding a
@@ -32,6 +32,7 @@ CANCELLED_BY = ("PATIENT", "CLINIC")
 TEST_STATUSES = ("PENDING", "DONE")
 RECORD_KINDS = ("PRESCRIPTION", "REPORT")
 ADDED_BY = ("PATIENT", "CLINIC")
+PAYMENT_STATUSES = ("CREATED", "PAID", "CANCELLED", "REFUND_PENDING", "REFUNDED", "REFUND_FAILED")
 
 
 def one_of(column: str, values: tuple[str, ...], name: str) -> CheckConstraint:
@@ -124,6 +125,7 @@ class DoctorClinic(Base):
     __tablename__ = "doctor_clinics"
     __table_args__ = (
         CheckConstraint("fee >= 0", name="doctor_clinics_fee_nonnegative"),
+        CheckConstraint("token_amount BETWEEN 0 AND fee", name="doctor_clinics_token_amount"),
         CheckConstraint("opd_start < opd_end", name="doctor_clinics_opd_hours"),
         CheckConstraint(
             "opd_days <@ ARRAY['MON','TUE','WED','THU','FRI','SAT','SUN']::text[]",
@@ -135,6 +137,8 @@ class DoctorClinic(Base):
     doctor_id: Mapped[uuid.UUID] = fk("doctors.id")
     clinic_id: Mapped[uuid.UUID] = fk("clinics.id")
     fee: Mapped[int] = mapped_column(Integer)  # whole rupees
+    # Paid online when booking; the rest (fee - token_amount) is paid at reception. 0 = no online payment.
+    token_amount: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     opd_days: Mapped[list[str]] = mapped_column(ARRAY(Text))  # e.g. ["MON", ..., "SAT"]
     opd_start: Mapped[time] = mapped_column(Time)  # Asia/Kolkata wall-clock time
     opd_end: Mapped[time] = mapped_column(Time)
@@ -255,3 +259,43 @@ class TestAdvice(Base):
     record_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("medical_records.id", ondelete="SET NULL")
     )
+
+
+# --- payments -------------------------------------------------------------------
+
+
+class Payment(Base):
+    """An online token-amount payment for a booking.
+
+    The booking row is only created once the payment is confirmed, so unpaid attempts never take
+    a token. Until then the requested patient details wait in `request`, which is cleared once
+    the booking exists. `booking_id` is chosen up front so the patient's tracking link works
+    before and after payment (no FK, because the booking doesn't exist yet).
+    """
+
+    __tablename__ = "payments"
+    __table_args__ = (
+        one_of("status", PAYMENT_STATUSES, "payments_status"),
+        CheckConstraint("amount_paise > 0", name="payments_amount_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    booking_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True)
+    doctor_clinic_id: Mapped[uuid.UUID] = fk("doctor_clinics.id")
+    date: Mapped[date] = mapped_column(Date)
+    visit_type: Mapped[str] = mapped_column(Text)
+    request: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))  # patient details + consent, until booked
+    tracking_code_hash: Mapped[str] = mapped_column(Text, unique=True)
+    amount_paise: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(Text, default="INR", server_default="INR")
+    gateway: Mapped[str] = mapped_column(Text)
+    gateway_order_id: Mapped[str] = mapped_column(Text, unique=True)
+    gateway_payment_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, default="CREATED", server_default="CREATED")
+    created_at: Mapped[datetime] = created_at()
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refund_id: Mapped[str | None] = mapped_column(Text)
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str | None] = mapped_column(Text)  # why it was refunded or why a refund failed
+
+    doctor_clinic: Mapped[DoctorClinic] = relationship()

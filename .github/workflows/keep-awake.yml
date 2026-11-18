@@ -1,0 +1,15 @@
+# Render's free plan sleeps after 15 minutes without visits, and waking takes about a minute.
+# Visiting /api/ping (no database) every 10 minutes keeps it awake during the day (India time),
+# so the first patient or doctor of the day doesn't wait. Set the API_URL repository variable
+# (Settings → Secrets and variables → Actions → Variables), e.g. https://clinically-api.onrender.com
+name: Keep API awake
+on:
+  schedule:
+    - cron: "*/10 1-17 * * *" # 6:30 am – 11:30 pm IST
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    if: ${{ vars.API_URL != '' }}
+    steps:
+      - run: curl -fsS --max-time 90 "${{ vars.API_URL }}/api/ping"

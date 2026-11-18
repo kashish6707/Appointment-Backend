@@ -230,6 +230,40 @@ def average_consult_minutes(db: DbSession, session_id: uuid.UUID) -> float:
     return float(seconds) / 60 if seconds else DEFAULT_CONSULT_MINUTES
 
 
+def _clock(at: datetime) -> str:
+    """A time to arrive by, rounded down to 5 minutes, as HH:MM in India."""
+    at = at.astimezone(IST)
+    return (at - timedelta(minutes=at.minute % 5)).strftime("%H:%M")
+
+
+def wait_estimates(db: DbSession, session: OpdSession, patients_ahead: list[int], now: datetime | None = None) -> list[tuple[int, str] | None]:
+    """For each waiting patient (given how many wait before them): minutes until their turn
+    and roughly what time that is.
+
+    - Not started: from the day's start (or now, if the doctor is late), spacing patients by the
+      day's hours ÷ limit, or the usual consult time.
+    - In OPD: from now, by the average consult time so far.
+    - On a break: the same, after the time left on the break (none once it has run over).
+    - Closed: no estimate.
+    """
+    now = now or now_ist()
+    if session.status == "CLOSED":
+        return [None for _ in patients_ahead]
+    average = average_consult_minutes(db, session.id)
+    if session.status == "NOT_STARTED":
+        plan = schedule.day_plan(db, session.doctor_clinic, session.date)
+        if not plan.open or plan.start is None:
+            return [None for _ in patients_ahead]
+        each = schedule.minutes_per_patient(plan) or average
+        start = datetime.combine(session.date, plan.start, tzinfo=IST)
+        base = max(start, now)
+        return [(max(round((base - now).total_seconds() / 60 + a * each), 0), _clock(base + timedelta(minutes=a * each))) for a in patients_ahead]
+    pause = 0.0
+    if session.status == "ON_BREAK" and session.break_until is not None:
+        pause = max((session.break_until - now).total_seconds() / 60, 0)
+    return [(round(pause + a * average), _clock(now + timedelta(minutes=pause + a * average))) for a in patients_ahead]
+
+
 def queue_status(db: DbSession, booking: Booking) -> dict:
     """What a patient's tracking page shows."""
     session = booking.session
@@ -244,11 +278,10 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
                 Booking.session_id == session.id, Booking.status == "WAITING", Booking.token < booking.token
             )
         )
-        average = average_consult_minutes(db, session.id)
-        estimate = round(ahead * average)
-        if session.status == "NOT_STARTED":
-            # Before OPD starts: when to arrive, from the day's hours and patient limit.
-            expected_at = schedule.expected_time(plan, ahead, average)
+        # Moves with breaks: the time left on a break is added before anyone's turn.
+        found = wait_estimates(db, session, [ahead])[0]
+        if found:
+            estimate, expected_at = found
     return {
         "bookingId": str(booking.id),
         "token": booking.token,
@@ -258,6 +291,7 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
         "estimatedMinutes": estimate,
         "sessionStatus": session.status,
         "sessionStartedAt": session.started_at.isoformat() if session.started_at else None,
+        "breakUntil": session.break_until.isoformat() if session.break_until else None,
         "sessionId": str(session.id),
         "date": session.date.isoformat(),
         "doctorName": dc.doctor.full_name,

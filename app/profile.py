@@ -1,14 +1,16 @@
 """The doctor's professional profile: photo, degrees, experience, fee, registration and the rest.
 
-Photos are stored under MEDIA_DIR with a random file name (never the uploaded name) and only
+Photos are stored (app/storage.py) with a random file name (never the uploaded name) and only
 after their bytes were checked to be a JPEG, PNG or WebP (app/schemas.py `_photo`).
 """
 
 import logging
 import uuid
-from pathlib import Path
+from pathlib import PurePosixPath as Path
 
-from app.config import get_settings
+from app import departments
+from app.storage import get_storage
+from app.timeutil import now_ist
 from app.models import Doctor, DoctorDegree
 from app.schemas import ProfileIn
 
@@ -18,43 +20,37 @@ EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 LEVEL_ORDER = ["UG", "PG", "SUPER_SPECIALITY", "FELLOWSHIP", "DIPLOMA", "OTHER"]
 
 
-def media_root() -> Path:
-    return Path(get_settings().media_dir).resolve()
-
-
-def photo_path(doctor: Doctor) -> Path | None:
-    if not doctor.photo_key:
-        return None
-    root = media_root()
-    path = (root / doctor.photo_key).resolve()
-    return path if path.is_relative_to(root) and path.is_file() else None
+def photo_bytes(doctor: Doctor) -> bytes | None:
+    return get_storage().get(doctor.photo_key) if doctor.photo_key else None
 
 
 def save_photo(data: bytes, content_type: str) -> str:
-    """Write the photo to a new random file and return its key."""
+    """Store the photo under a new random key and return the key."""
     key = f"doctors/{uuid.uuid4().hex}{EXTENSIONS[content_type]}"
-    path = media_root() / key
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    get_storage().put(key, data, content_type)
     return key
 
 
 def delete_photo(key: str | None) -> None:
     if not key:
         return
-    root = media_root()
-    path = (root / key).resolve()
-    if path.is_relative_to(root):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            log.warning("Couldn't delete old photo %s", key)
+    try:
+        get_storage().delete(key)
+    except Exception:
+        log.warning("Couldn't delete old photo %s", key)
 
 
 def apply(doctor: Doctor, body: ProfileIn) -> str | None:
     """Copy the profile onto the doctor. Saves a new photo if one was sent and returns the
     previous photo's key, to delete once the change is committed."""
     doctor.department = body.specialisation
+    doctor.department_key = departments.match(body.specialisation)
+    doctor.designation = body.designation
+    doctor.name_hi = body.name_hi
+    if body.photo_consent is True and doctor.photo_consent_at is None:
+        doctor.photo_consent_at = now_ist()
+    elif body.photo_consent is False:
+        doctor.photo_consent_at = None
     doctor.experience_years = body.experience_years
     doctor.consultation_fee = body.fee
     doctor.registration_no = body.registration_no
@@ -95,9 +91,15 @@ def _photo_url(doctor: Doctor, base: str) -> str | None:
 
 
 def public_json(doctor: Doctor) -> dict:
-    """What patients see. The registration number and contact details stay private."""
+    """What patients see. The photo and registration number only if the doctor agreed to show
+    them (otherwise patients see initials); contact details never."""
+    consent = doctor.photo_consent_at is not None
     return {
-        "photoUrl": _photo_url(doctor, f"/api/public/doctors/{doctor.id}/photo"),
+        "photoUrl": _photo_url(doctor, f"/api/public/doctors/{doctor.id}/photo") if consent else None,
+        "registrationNo": doctor.registration_no if consent else None,
+        "nameHi": doctor.name_hi,
+        "designation": doctor.designation,
+        "departmentKey": doctor.department_key,
         "specialisation": doctor.department,
         "experienceYears": doctor.experience_years,
         "qualification": doctor.qualification,
@@ -119,6 +121,7 @@ def own_json(doctor: Doctor) -> dict:
         "fullName": doctor.full_name,
         "photoUrl": _photo_url(doctor, "/api/doctor/profile/photo"),
         "registrationNo": doctor.registration_no,
+        "photoConsent": doctor.photo_consent_at is not None,
         "medicalCouncil": doctor.medical_council,
         "complete": is_complete(doctor),
     }

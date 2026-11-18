@@ -1,0 +1,30 @@
+# Render Blueprint for the Clinically API (free web service).
+# Render dashboard → New → Blueprint → pick this repo. Fill in the "sync: false" values when asked.
+services:
+  - type: web
+    name: clinically-api
+    runtime: python
+    plan: free
+    region: singapore # closest Render region to India
+    buildCommand: pip install -r requirements.txt
+    # Migrations run on every start: they're quick, and the free plan has no pre-deploy step.
+    # One worker only: live-update rooms live in memory (app/realtime.py).
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'
+    healthCheckPath: /api/ping # no database: lets Neon sleep when idle
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: DATABASE_URL # Neon connection string (postgresql://…?sslmode=require)
+        sync: false
+      - key: FRONTEND_ORIGIN # the Vercel site, e.g. https://clinically.vercel.app
+        sync: false
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: STORAGE_BACKEND # the free plan's disk is wiped on every restart
+        value: db
+      - key: AUTO_VERIFY_DOCTORS
+        value: "true"
+      - key: TRIAL_DAYS
+        value: "90"
+      - key: NOTIFY_CHANNEL
+        value: log

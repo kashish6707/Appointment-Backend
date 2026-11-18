@@ -146,11 +146,19 @@ def test_public_profile_only_for_verified_doctors(client, db):
     with db.begin():
         db.execute(text("UPDATE doctors SET is_verified = true"))
 
+    # Verified, but no consent yet: initials instead of the photo, no registration number.
     data = client.get(f"/api/public/doctors/{doctor_id}").json()
-    assert data["photoUrl"].startswith(f"/api/public/doctors/{doctor_id}/photo?v=")
+    assert data["photoUrl"] is None and data["registrationNo"] is None
+    assert client.get(f"/api/public/doctors/{doctor_id}/photo").status_code == 404
     assert data["experienceYears"] == 12 and data["fee"] == 500
     assert [d["name"] for d in data["degrees"]] == ["MBBS", "MS (Orthopaedics)"]
-    assert "registrationNo" not in data and "phone" not in data
+    assert "phone" not in data
+
+    with db.begin():
+        db.execute(text("UPDATE doctors SET photo_consent_at = now()"))
+    data = client.get(f"/api/public/doctors/{doctor_id}").json()
+    assert data["photoUrl"].startswith(f"/api/public/doctors/{doctor_id}/photo?v=")
+    assert data["registrationNo"] == "BMC-12345"
     photo = client.get(data["photoUrl"])
     assert photo.status_code == 200 and photo.content == JPEG
     assert photo.headers["cache-control"] == "public, max-age=604800"

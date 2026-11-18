@@ -49,6 +49,7 @@ emptied before each test.
 | `RECORDS_DIR`      | `storage/records`                         | Folder holding prescription/report files  |
 | `MEDIA_DIR`        | `storage/media`                           | Folder holding doctor photos              |
 | `NOTIFY_CHANNEL`   | `log`                                     | How messages reach patients (see below)   |
+| `MEDIA_PUBLIC_BASE_URL` | (empty)                              | CDN for public images; empty = `/api/media` |
 
 ## How requests arrive
 
@@ -237,6 +238,21 @@ which is also how a doctor closes a future day for bookings. The patient current
 is marked DONE; waiting patients are left as they are. **409** for a change that doesn't fit the
 current status (the message says why).
 
+#### Breaks with a set length
+
+`pause` takes `{ "minutes": 5–180 }` (15 if left out) and sets `breakStartedAt` and `breakUntil`
+on the session. `POST /api/doctor/sessions/:id/break/extend` `{ minutes }` adds time (from the
+planned end, or from now if the break has run over; at most 4 hours in all). `resume` and `end`
+clear both.
+
+**Expected times move with the break.** For each waiting patient: minutes until their turn = time
+left on the break (0 once it has run over) + patients ahead × the average consult time so far.
+Before OPD starts it's the day's start (or now, if the doctor is late) + patients ahead × (hours ÷
+limit). The patient's booking status returns `estimatedMinutes`, `expectedAt` (`HH:MM`, rounded
+down to 5 minutes) and `breakUntil`; the dashboard returns `expected` = `{ bookingId: "HH:MM" }`
+for waiting patients, and booking details return `expectedAt`. Patients' live `session.updated`
+events include `breakUntil`.
+
 #### Telling patients OPD has started
 
 `start` also queues one message per **waiting** patient that day ("Dr. … has started OPD at …
@@ -316,6 +332,67 @@ defaults to the doctor's earliest OPD slot.
 - **`GET /api/doctor/records/:id/file`**: the file, when the patient consented and has booked with
   this doctor. PDFs and JPEG/PNG/WebP open inline; anything else downloads, because the file is
   served from the app's own site. Always `Cache-Control: private, no-store`.
+
+### Directory: home feed, clinic pages, search (patient app)
+
+Only clinics with at least one **verified** doctor are listed, and only verified doctors appear.
+A doctor's **photo and registration number are public only if they agreed** (`photoConsent` in
+their profile, stored as `photo_consent_at`); otherwise `photoUrl` and `registrationNo` are null
+and patients see `initials`.
+
+- **`GET /api/public/home?areaId=&lat=&lng=&type=all|clinic|hospital&openNow=true&department=&q=&cursor=`**
+  → `{ departments, clinics, nextCursor }`. `departments` is the fixed list (`key, nameEn, nameHi,
+  iconKey`, `app/departments.py`). `clinics` are nearest first, 10 per page: distance from
+  `lat,lng`, else the area's centre (`GET /api/public/areas`), else Patna's centre. Clinics
+  without a position come last. `department` (a key) keeps clinics with a doctor in it; `q` keeps
+  clinics whose name or area, or a doctor's name or department (EN/HI), contains the words. Each
+  clinic: `departmentKeys`, `id, name, nameHi, type, coverPhotoUrl, address,
+  areaName, distanceKm, doctorCount, departmentCount, summary` ("2 doctors, Orthopaedics"),
+  `opdStatus` (`OPEN_NOW` | `OPENS_LATER` with `opensAt` | `CLOSED_TODAY`), `waitingNow`, and
+  `doctors` (first 5: `id, doctorClinicId, name, nameHi, department, departmentKey,
+  designation, degree, experienceYears, fee, registrationNo, photoUrl, initials`).
+- **`GET /api/public/clinics/:clinicId`** → type, name, address, `lat/lng`
+  (`locationIsApproximate` when it's the area's centre), phone, `opdHoursTextEn/Hi`,
+  `coverPhoto` and `photos` (`large`/`small` URLs), `opdStatus`, `opensAt`, `waitingNow`, and the
+  `departments` present.
+- **`GET /api/public/clinics/:clinicId/doctors?department=<key>&cursor=`** → `{ doctors,
+  nextCursor }`, 10 per page, one entry per OPD slot (`doctorClinicId` for booking), with
+  `opdStatus`, `waitingToday` (when open) or `opensAt`.
+- **`GET /api/public/search?q=`** → `{ results }`, up to 20, mixed: each has `type` = `doctor`,
+  `clinic` or `hospital`, `id, name, nameHi, subtitle, photoUrl`, and `clinicId` /
+  `doctorClinicId`. Matches clinic names (English or Hindi) and areas, doctor names, and
+  departments ("bone", "हड्डी रोग" or "heart" find those doctors). Names starting with the words
+  come first.
+
+**Opening status** comes from the day's plan (`app/schedule.py`) and today's session: a running
+OPD (in OPD or on a break) is always `OPEN_NOW`, even past its hours; an ended one is
+`CLOSED_TODAY`. A clinic is open if any of its doctors is. Statuses and waiting counts are cached
+for 30 seconds per slot (`app/directory.py`); clinic edits clear the cache. Paging cursors are
+opaque strings; a bad one gets **400**.
+
+### Clinic details and photos (doctor)
+
+Any doctor with an OPD slot at a clinic can edit it (others get **404**). Every change goes into
+the activity log.
+- `GET /api/doctor/clinic-details/:clinicId` → the clinic, its photos and the list of areas
+- `PATCH /api/doctor/clinic-details/:clinicId` `{ type?, name?, nameHi?, address?, areaKey?,
+  lat?, lng?, phone?, opdHoursTextEn?, opdHoursTextHi? }`. Only the fields sent change; send
+  `lat` and `lng` together.
+- `POST /api/doctor/clinic-details/:clinicId/photos` `{ image: "data:image/…;base64,…", cover? }`
+  → **201**, up to 12 photos. The first photo becomes the cover.
+- `DELETE …/photos/:photoId`, `PUT …/photos/order` `{ photoIds }`, `PUT …/cover` `{ photoId }`
+
+**Images** (`app/images.py`): JPEG, PNG or WebP of at most 5 MB and at least 200 px a side,
+decoded with Pillow (the bytes decide the type), turned upright from EXIF, and saved again as
+JPEG at **1200 px and 400 px** wide. Re-encoding removes all metadata, including GPS. Files go
+through `app/storage.py`: `LocalStorage` under `MEDIA_DIR`, served at `/api/media/<key>` with
+long cache headers. For production, add an S3 storage class there and set
+`MEDIA_PUBLIC_BASE_URL` to the CDN. These are public marketing images; doctors' photos and
+medical records never go through this path.
+
+**Doctor profile** adds `designation` (e.g. "Director & HOD, Medical Oncology"), `nameHi` and
+`photoConsent` (true/false; left out when editing = unchanged). The free-text specialisation is
+matched to a department (`departmentKey`).
 
 ### Patient app (`/api/public`, no login)
 
@@ -405,6 +482,26 @@ Body `{ code, reason? }`. **200** `{ bookingId, status: "CANCELLED", refund: { a
 ### `GET /api/health`
 - **200** `{ "status": "ok" }` after `SELECT 1`, or **503** if the database is unreachable
 
+## Free trial rollout
+
+- **Registration** sets `trial_ends_at` to now + `TRIAL_DAYS` (90). `GET /api/doctor/me` returns it as `doctor.trialEndsAt` to the doctor only (null for staff). Nothing is locked when it passes; the dashboard shows a banner.
+- **`AUTO_VERIFY_DOCTORS=true`** makes new doctors visible to patients straight away (default false: an admin sets `is_verified`). Tests always run with it off.
+- **`POST /api/doctor/clinic-details`** (doctor only) adds a clinic and the doctor's OPD there. Body `{ type?: CLINIC|HOSPITAL, name, address, areaKey, phone?, fee, days: ["MON",…], start: "HH:MM", end: "HH:MM", limit? }`. Writes the clinic, the doctor-clinic slot and weekly hours rows for the chosen days. **201** with the slot (same shape as `doctor.clinics[]`). Up to 10 clinics.
+- **`GET /api/public/clinics/{doctorClinicId}/availability`** also returns `doctor`, `clinic`, `fee` and `tokenAmount`, so the booking page needs one call.
+
+### Live updates for patients
+
+A tracking page connects to Socket.IO with **no cookie**, sending `auth: { bookingId, code }` (its tracking link). It joins `booking:<id>` and `session:<sessionId>` only, and gets `booking.updated` and `session.updated` (token numbers and queue status, no patient details). A wrong code is refused.
+
+When the website's host can't forward WebSockets (Vercel), browsers connect to this server directly. The dashboard first calls **`GET /api/auth/realtime-ticket`** through the website (cookie checked) and connects with `auth: { ticket }`. A ticket works once, for 60 seconds. `FRONTEND_ORIGIN` must list the website's address (several, comma-separated, are allowed).
+
+## Hosting (free): Render + Neon
+
+1. **Neon** (neon.tech): create a project in the Singapore region and copy its connection string.
+2. **Render** (render.com): New → Blueprint → this repo. `render.yaml` sets everything except `DATABASE_URL` (the Neon string; `postgresql://` is accepted as is) and `FRONTEND_ORIGIN` (the Vercel address). Migrations run on every start.
+3. Images go in the database (`STORAGE_BACKEND=db`), because the free plan's disk is wiped on every restart. Uploaded medical record files still use `RECORDS_DIR` on disk: don't rely on them on the free plan.
+4. The free plan sleeps after 15 idle minutes. `.github/workflows/keep-awake.yml` calls `GET /api/ping` (which doesn't touch the database, so Neon can still sleep) every 10 minutes from 6:30 am to 11:30 pm IST. Set the repository variable `API_URL` to turn it on.
+
 ## Curl walkthrough
 
 With the server running on port 4000:
@@ -454,6 +551,12 @@ app/routers/staff.py   staff access management, invites, activity log (doctor on
 app/access.py        who is signed in, permissions, clinic limits, activity log helper
 app/profile.py       doctor profile: photo storage, degrees, public and own views
 app/routers/profile.py  doctor's own profile and the public doctor photo
+app/departments.py   fixed department list (EN/HI, icons) and Patna areas
+app/directory.py     public directory: clinic cards, opening status (cached), distance, paging
+app/images.py        image checks and resizing (1200/400 px)
+app/storage.py       where public images are stored (local; S3 plugs in here)
+app/routers/directory.py  home feed, clinic page, clinic doctors, search, /api/media
+app/routers/clinics.py    doctors editing their clinics and photos
 app/notifications.py  messages to patients: outbox, sending and retries
 app/messaging.py     senders (log for development; add SMS/WhatsApp here)
 app/schedule.py      a date's OPD plan: weekly hours, exceptions, limit, expected times

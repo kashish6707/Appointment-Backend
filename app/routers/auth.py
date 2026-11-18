@@ -7,7 +7,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
-from app import profile, security
+from app import profile, realtime, security
 from app.config import get_settings
 from app.access import CurrentIdentity, memberships_of
 from app.deps import Db
@@ -39,6 +39,7 @@ def _doctor_json(doctor_id, full_name: str) -> dict:
 @router.post("/doctor/register", status_code=201)
 def register(body: Annotated[RegisterBody, Body(discriminator="method")], db: Db):
     is_phone = isinstance(body, RegisterPhone)
+    settings = get_settings()
     # A phone number or email signs in to one account only, doctor or staff.
     staff_column = Staff.phone if is_phone else Staff.email
     if db.scalar(select(Staff.id).where(staff_column == (body.phone if is_phone else body.email))):
@@ -48,6 +49,8 @@ def register(body: Annotated[RegisterBody, Body(discriminator="method")], db: Db
         phone=body.phone if is_phone else None,
         email=None if is_phone else body.email,
         password_hash=security.hash_password(body.password),
+        is_verified=settings.auto_verify_doctors,
+        trial_ends_at=datetime.now(timezone.utc) + timedelta(days=settings.trial_days),
     )
     profile.apply(doctor, body.profile)
     db.add(doctor)
@@ -192,3 +195,10 @@ def logout(request: Request, db: Db):
     response = Response(status_code=204)
     response.headers.append("set-cookie", security.cleared_cookie())
     return response
+
+
+@router.get("/realtime-ticket")
+def realtime_ticket(identity: CurrentIdentity, request: Request):
+    """A one-use, one-minute ticket for connecting to live updates directly (app/realtime.py)."""
+    token = request.cookies.get(security.COOKIE_NAME, "")
+    return {"ticket": realtime.new_ticket(security.hash_token(token)), "expiresIn": realtime.TICKET_SECONDS}

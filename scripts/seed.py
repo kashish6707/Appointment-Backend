@@ -60,6 +60,8 @@ def main() -> None:
             email="rajeev.anand@example.com",
             password_hash=security.hash_password(DEMO_PASSWORD),
             department="Orthopaedics",
+            department_key="orthopaedics",
+            designation="Senior Consultant, Orthopaedics",
             qualification="MBBS, MS (Orthopaedics)",
             experience_years=18,
             registration_no="BMC-24817",
@@ -70,6 +72,10 @@ def main() -> None:
             area="Kankarbagh",
             address="Plot 14, Main Road, Kankarbagh, Patna, Bihar 800020",
             phone="9801234500",
+            lat=25.5992,
+            lng=85.1597,
+            opd_hours_text_en="Mon–Sat, 10 am – 2 pm",
+            opd_hours_text_hi="सोम–शनि, सुबह 10 – दोपहर 2",
         )
         doctor_clinic = DoctorClinic(
             doctor=doctor,

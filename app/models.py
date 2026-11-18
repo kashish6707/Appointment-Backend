@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    LargeBinary,
     Index,
     Integer,
     Numeric,
@@ -80,6 +81,11 @@ class Doctor(Base):
     experience_years: Mapped[int | None] = mapped_column(SmallInteger)
     registration_no: Mapped[str | None] = mapped_column(Text)
     medical_council: Mapped[str | None] = mapped_column(Text)  # e.g. "Bihar Council of Medicine"
+    designation: Mapped[str | None] = mapped_column(Text)  # e.g. "Director & HOD, Medical Oncology"
+    name_hi: Mapped[str | None] = mapped_column(Text)
+    department_key: Mapped[str | None] = mapped_column(Text)  # app/departments.py, from `department`
+    # Photo and registration number are shown to patients only after the doctor agreed.
+    photo_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Public profile, filled in at registration (older accounts complete it on the profile page).
     photo_key: Mapped[str | None] = mapped_column(Text)  # file under MEDIA_DIR
     photo_content_type: Mapped[str | None] = mapped_column(Text)
@@ -88,6 +94,8 @@ class Doctor(Base):
     achievements: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list, server_default="{}")
     expertise: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list, server_default="{}")
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # End of the free trial. Nothing is locked after it: the dashboard shows a banner.
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at()
 
     clinics: Mapped[list["DoctorClinic"]] = relationship(back_populates="doctor")
@@ -201,14 +209,71 @@ class LoginAttempt(Base):
 # --- clinics and OPD ----------------------------------------------------------
 
 
-class Clinic(Base):
-    __tablename__ = "clinics"
+class Area(Base):
+    """A part of Patna patients can pick (app/departments.py AREAS), with its centre point."""
+
+    __tablename__ = "areas"
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    key: Mapped[str] = mapped_column(Text, unique=True)
     name: Mapped[str] = mapped_column(Text)
-    area: Mapped[str] = mapped_column(Text)
+    name_hi: Mapped[str] = mapped_column(Text)
+    lat: Mapped[float] = mapped_column(Numeric(9, 6))
+    lng: Mapped[float] = mapped_column(Numeric(9, 6))
+
+
+class Clinic(Base):
+    __tablename__ = "clinics"
+    __table_args__ = (
+        one_of("type", ("CLINIC", "HOSPITAL"), "clinics_type"),
+        CheckConstraint(
+            "(lat IS NULL) = (lng IS NULL) AND (lat IS NULL OR (lat BETWEEN -90 AND 90 AND lng BETWEEN -180 AND 180))",
+            name="clinics_location",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    type: Mapped[str] = mapped_column(Text, default="CLINIC", server_default="CLINIC")
+    name: Mapped[str] = mapped_column(Text)
+    name_hi: Mapped[str | None] = mapped_column(Text)
+    area: Mapped[str] = mapped_column(Text)  # shown as written; area_id is for distance
+    area_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("areas.id", ondelete="SET NULL"))
     address: Mapped[str] = mapped_column(Text)
+    lat: Mapped[float | None] = mapped_column(Numeric(9, 6))  # exact location; else the area's centre
+    lng: Mapped[float | None] = mapped_column(Numeric(9, 6))
     phone: Mapped[str | None] = mapped_column(Text)
+    cover_photo_key: Mapped[str | None] = mapped_column(Text)  # one of its photos' keys
+    opd_hours_text_en: Mapped[str | None] = mapped_column(Text)  # e.g. "Mon–Sat 10 am–2 pm"
+    opd_hours_text_hi: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at()
+
+    area_ref: Mapped[Area | None] = relationship(lazy="joined")
+    photos: Mapped[list["ClinicPhoto"]] = relationship(order_by="ClinicPhoto.position", cascade="all, delete-orphan", lazy="selectin")
+
+
+class StoredFile(Base):
+    """An uploaded image kept in the database (STORAGE_BACKEND=db, app/storage.py)."""
+
+    __tablename__ = "stored_files"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    content_type: Mapped[str] = mapped_column(Text)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ClinicPhoto(Base):
+    """A public marketing photo of a clinic, stored at two widths (app/images.py)."""
+
+    __tablename__ = "clinic_photos"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    clinic_id: Mapped[uuid.UUID] = fk("clinics.id")
+    position: Mapped[int] = mapped_column(SmallInteger)
+    key: Mapped[str] = mapped_column(Text, unique=True)  # base key; files are <key>-1200.jpg and <key>-400.jpg
+    width: Mapped[int] = mapped_column(SmallInteger)  # of the large version
+    height: Mapped[int] = mapped_column(SmallInteger)
+    created_by: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = created_at()
 
 
@@ -308,6 +373,9 @@ class OpdSession(Base):
     # When "End OPD" was pressed. The patient it marked DONE has completed_at equal to this,
     # which is how "Reopen OPD" finds them again.
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # While ON_BREAK: when the break started and when the doctor said they'd be back.
+    break_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    break_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at()
 
     doctor_clinic: Mapped[DoctorClinic] = relationship()

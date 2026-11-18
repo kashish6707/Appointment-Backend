@@ -3,7 +3,7 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import Field
 from sqlalchemy import select
 
@@ -18,12 +18,12 @@ router = APIRouter()
 PHOTO_NOT_FOUND = "There's no photo."
 
 
-def _photo_response(doctor: Doctor, cache: str) -> FileResponse:
-    path = profile.photo_path(doctor)
-    if path is None:
+def _photo_response(doctor: Doctor, cache: str) -> Response:
+    data = profile.photo_bytes(doctor)
+    if data is None:
         raise HTTPException(404, PHOTO_NOT_FOUND)
-    return FileResponse(
-        path,
+    return Response(
+        data,
         media_type=doctor.photo_content_type,
         headers={"Cache-Control": cache, "X-Content-Type-Options": "nosniff", "Content-Disposition": "inline"},
     )
@@ -58,8 +58,10 @@ def own_photo(actor: Root):
 
 @router.get("/api/public/doctors/{doctor_id}/photo")
 def public_photo(doctor_id: uuid.UUID, db: Db):
-    """Only verified doctors' photos are public, like the rest of their profile."""
-    doctor = db.scalar(select(Doctor).where(Doctor.id == doctor_id, Doctor.is_verified.is_(True)))
+    """Public only for verified doctors who agreed to show their photo."""
+    doctor = db.scalar(
+        select(Doctor).where(Doctor.id == doctor_id, Doctor.is_verified.is_(True), Doctor.photo_consent_at.is_not(None))
+    )
     if doctor is None:
         raise HTTPException(404, PHOTO_NOT_FOUND)
     # The URL carries ?v=<photo id>, so it can be cached for a long time.

@@ -67,6 +67,8 @@ def me(identity: CurrentIdentity, db: Db):
             "photoUrl": profile.own_json(doctor)["photoUrl"] if root else (profile.public_json(doctor)["photoUrl"] if doctor.is_verified else None),
             # Older accounts registered before the full profile was required.
             "profileComplete": profile.is_complete(doctor),
+            # Free trial: shown to the doctor only. Nothing is locked when it ends.
+            "trialEndsAt": doctor.trial_ends_at.isoformat() if root and doctor.trial_ends_at else None,
             "clinics": [clinic_slot(dc) for dc in clinics],
         },
     }

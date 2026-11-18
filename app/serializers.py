@@ -56,6 +56,8 @@ def session_json(s: OpdSession) -> dict:
         "status": s.status,
         "startedAt": iso(s.started_at),
         "closedAt": iso(s.closed_at),
+        "breakStartedAt": iso(s.break_started_at),
+        "breakUntil": iso(s.break_until),
         "currentToken": s.current_token,
     }
 

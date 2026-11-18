@@ -23,7 +23,12 @@ def queue_changed(session: OpdSession, doctor_id: uuid.UUID) -> None:
     events.emit(
         f"session:{session.id}",
         "session.updated",
-        {"id": str(session.id), "status": session.status, "nowServing": session.current_token},
+        {
+            "id": str(session.id),
+            "status": session.status,
+            "nowServing": session.current_token,
+            "breakUntil": session.break_until.isoformat() if session.break_until else None,
+        },
     )
 
 

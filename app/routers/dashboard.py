@@ -85,6 +85,12 @@ def _with_place(b: Booking) -> dict:
     return {**booking_item(b), "date": b.session.date.isoformat(), "clinicName": b.session.doctor_clinic.clinic.name}
 
 
+def _expected(db: Db, session: OpdSession, bookings_: list[Booking]) -> dict[str, str]:
+    waiting = [b for b in bookings_ if b.status == "WAITING"]
+    estimates = bookings.wait_estimates(db, session, list(range(len(waiting))))
+    return {str(b.id): e[1] for b, e in zip(waiting, estimates) if e}
+
+
 def _number(value) -> float | None:
     return float(value) if value is not None else None
 
@@ -151,6 +157,8 @@ def dashboard(actor: CanView, db: Db, day: DayParam = None, doctor_clinic_id: Sl
         "isOpdDay": opd_day,
         "plan": plan.json(),
         "session": session_json(session) if session else None,
+        # Roughly when each waiting patient's turn comes (moves with breaks): { bookingId: "HH:MM" }.
+        "expected": _expected(db, session, active) if session else {},
         # How the "OPD has started" messages went (all zero before OPD starts).
         "notifications": notifications.session_summary(db, session.id) if session else None,
         "stats": {
@@ -293,6 +301,7 @@ def booking_detail(booking_id: uuid.UUID, actor: CanView, db: Db):
         "booking": _with_place(booking),
         "session": session_json(session),
         "queuePosition": position,
+        "expectedAt": (bookings.wait_estimates(db, session, [position - 1])[0] or (None, None))[1] if position else None,
         "patient": _patient_detail(booking, actor),
         "correction": _correction_json(correction_for(patient, actor.doctor.id), patient),
         "recordsConsent": consent,

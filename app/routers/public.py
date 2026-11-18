@@ -291,4 +291,15 @@ def availability(doctor_clinic_id: uuid.UUID, db: Db):
         else:
             reason = None
         days.append({**plan.json(), "booked": n, "left": left, "bookable": reason is None, "reason": reason})
-    return {"doctorClinicId": str(dc.id), "days": days}
+    doctor = dc.doctor
+    return {
+        "doctorClinicId": str(dc.id),
+        # Who and where, so the booking page can show it from this one call.
+        "doctor": {"id": str(doctor.id), "name": doctor.full_name, "nameHi": doctor.name_hi,
+                   "department": doctor.department, "designation": doctor.designation},
+        "clinic": {"id": str(dc.clinic.id), "name": dc.clinic.name, "nameHi": dc.clinic.name_hi,
+                   "area": dc.clinic.area, "address": dc.clinic.address},
+        "fee": dc.fee,
+        "tokenAmount": dc.token_amount,
+        "days": days,
+    }

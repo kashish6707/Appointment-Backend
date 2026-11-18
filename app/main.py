@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import notifications, realtime
 from app.db import engine
-from app.routers import auth, dashboard, doctor, payments, profile, public, queue, schedule, staff
+from app.routers import auth, clinics, dashboard, directory, doctor, payments, profile, public, queue, schedule, staff
 from app.schemas import FIELD_MSGS, METHOD_MSG
 
 log = logging.getLogger("clinically")
@@ -56,6 +56,8 @@ api.include_router(queue.router)
 api.include_router(staff.router)
 api.include_router(schedule.router)
 api.include_router(profile.router)
+api.include_router(directory.router)
+api.include_router(clinics.router)
 
 
 def error(status: int, message: str) -> JSONResponse:
@@ -118,6 +120,12 @@ async def on_http_error(request: Request, exc: StarletteHTTPException):
 async def on_unexpected_error(request: Request, exc: Exception):
     log.exception("Unhandled error on %s %s", request.method, request.url.path)
     return error(500, "Something went wrong on our side. Try again in a moment.")
+
+
+@api.get("/api/ping")
+def ping():
+    """Keeps the server awake (.github/workflows/keep-awake.yml) without waking the database."""
+    return {"status": "ok"}
 
 
 @api.get("/api/health")

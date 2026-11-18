@@ -9,3 +9,4 @@ httpx==0.28.1
 pydantic==2.14.3
 python-socketio==5.11.4
 python-engineio==4.10.1
+pillow==10.4.0

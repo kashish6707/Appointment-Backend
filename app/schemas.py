@@ -54,6 +54,7 @@ FIELD_MSGS = {
     "q": "Keep the search under 100 characters.",
     "names": "Add 1 to 10 test names, each 2 to 100 characters.",
     "role": "Choose a role: receptionist or compounder.",
+    "minutes": "Choose a break from 5 to 180 minutes.",
     "profile": "Add your professional details: experience, degrees, fee, registration number and photo.",
     "experienceYears": "Enter your years of experience, from 0 to 70.",
     "degrees": "Add at least one degree (up to 15).",
@@ -62,9 +63,21 @@ FIELD_MSGS = {
     "medicalCouncil": "Keep the council name under 100 characters.",
     "photo": "Add a clear photo of yourself (JPEG, PNG or WebP, up to 2 MB).",
     "about": "Keep “About” under 1,500 characters.",
+    "address": "Enter the full address (5 to 300 characters).",
+    "opdHoursTextEn": "Keep the OPD hours text under 200 characters.",
+    "opdHoursTextHi": "Keep the OPD hours text under 200 characters.",
     "achievements": "Add up to 20 achievements, each 2 to 200 characters.",
     "expertise": "Add up to 20 areas of expertise, each 2 to 60 characters.",
     "specialisation": "Keep the specialisation under 80 characters.",
+    "designation": "Keep the designation under 120 characters.",
+    "nameHi": "Keep the Hindi name under 100 characters.",
+    "photoConsent": "Say whether patients may see your photo and registration number (true or false).",
+    "type": "Choose clinic or hospital.",
+    "clinicName": "Enter the clinic or hospital name (2 to 120 characters).",
+    "image": "Upload a JPEG, PNG or WebP image of up to 5 MB.",
+    "photoIds": "Send every photo of this clinic once, in the new order.",
+    "photoId": "Choose one of this clinic's photos.",
+    "areaKey": "Choose an area from the list.",
     "permissions": "Choose what this person can do.",
     "doctorClinicIds": "Choose at least one of your clinics.",
     "doctorId": "Choose a doctor.",
@@ -584,6 +597,10 @@ class ProfileIn(_Body):
     medical_council: Annotated[str | None, BeforeValidator(_text(100, "medicalCouncil", 2))] = Field(None, alias="medicalCouncil")
     photo: Annotated[object, BeforeValidator(_photo)] = None
     about: Annotated[str | None, BeforeValidator(_text(1500, "about"))] = None
+    designation: Annotated[str | None, BeforeValidator(_text(120, "designation", 2))] = None
+    name_hi: Annotated[str | None, BeforeValidator(_text(100, "nameHi", 2))] = Field(None, alias="nameHi")
+    # Show my photo and registration number to patients. Left out when editing: unchanged.
+    photo_consent: StrictBool | None = Field(None, alias="photoConsent")
     achievements: Annotated[list[str], BeforeValidator(_text_list(20, 200, "achievements"))] = []
     expertise: Annotated[list[str], BeforeValidator(_text_list(20, 60, "expertise"))] = []
 
@@ -598,3 +615,105 @@ class RegisterProfileIn(ProfileIn):
 
 RegisterPhone.model_rebuild()
 RegisterEmail.model_rebuild()
+
+
+# --- breaks -------------------------------------------------------------------------------
+
+
+def _minutes(v: object) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or not 5 <= v <= 180:
+        raise ValueError(FIELD_MSGS["minutes"])
+    return v
+
+
+BreakMinutes = Annotated[int, BeforeValidator(_minutes)]
+
+
+class BreakIn(_Body):
+    """How long the break lasts. Older clients that send nothing get 15 minutes."""
+
+    minutes: BreakMinutes = 15
+
+
+class ExtendBreakIn(_Body):
+    minutes: BreakMinutes
+
+
+# --- clinic details and photos ------------------------------------------------------------
+
+
+def _coordinate(lo: float, hi: float):
+    def check(v: object):
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise ValueError("That location isn't valid. Send latitude and longitude in degrees.")
+        return round(float(v), 6)
+
+    return check
+
+
+class ClinicUpdateIn(_Body):
+    """Only the fields sent change. Send null to clear an optional one."""
+
+    type: Literal["CLINIC", "HOSPITAL"] = None
+    name: Annotated[str | None, BeforeValidator(_text(120, "clinicName", 2))] = None
+    name_hi: Annotated[str | None, BeforeValidator(_text(120, "nameHi", 2))] = Field(None, alias="nameHi")
+    address: Annotated[str | None, BeforeValidator(_text(300, "address", 5))] = None
+    area_key: str | None = Field(None, alias="areaKey")
+    lat: Annotated[float | None, BeforeValidator(_coordinate(-90, 90))] = None
+    lng: Annotated[float | None, BeforeValidator(_coordinate(-180, 180))] = None
+    phone: Annotated[str | None, BeforeValidator(_optional_phone)] = None
+    opd_hours_text_en: Annotated[str | None, BeforeValidator(_text(200, "opdHoursTextEn"))] = Field(None, alias="opdHoursTextEn")
+    opd_hours_text_hi: Annotated[str | None, BeforeValidator(_text(200, "opdHoursTextHi"))] = Field(None, alias="opdHoursTextHi")
+
+    @model_validator(mode="after")
+    def _location_pair(self):
+        if ("lat" in self.model_fields_set) != ("lng" in self.model_fields_set) or (self.lat is None) != (self.lng is None):
+            raise ValueError("Send both lat and lng, or neither.")
+        return self
+
+
+class ClinicPhotoIn(_Body):
+    image: str = Field(max_length=7_100_000)  # data URL of up to 5 MB
+    cover: StrictBool = False
+
+
+class PhotoOrderIn(_Body):
+    photo_ids: list[uuid.UUID] = Field(alias="photoIds", max_length=12)
+
+
+class CoverIn(_Body):
+    photo_id: uuid.UUID = Field(alias="photoId")
+
+
+def _fee(v: object) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 100_000:
+        raise ValueError(FIELD_MSGS["fee"])
+    return v
+
+
+class ClinicCreateIn(_Body):
+    """A new clinic and the doctor's OPD there: one set of hours on the chosen weekdays.
+    Different hours per weekday, days off and photos are set afterwards."""
+
+    type: Literal["CLINIC", "HOSPITAL"] = "CLINIC"
+    name: Annotated[str, BeforeValidator(_text(120, "clinicName", 2))]
+    address: Annotated[str, BeforeValidator(_text(300, "address", 5))]
+    area_key: str = Field(alias="areaKey")
+    phone: Annotated[str | None, BeforeValidator(_optional_phone)] = None
+    fee: Annotated[int, BeforeValidator(_fee)]
+    days: list[Literal["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]] = Field(min_length=1, max_length=7)
+    start: ClockTime
+    end: ClockTime
+    limit: Limit = None
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.name is None or self.address is None:
+            raise ValueError(FIELD_MSGS["clinicName" if self.name is None else "address"])
+        if len(set(self.days)) != len(self.days):
+            raise ValueError("Choose each OPD day once.")
+        if self.start is None or self.end is None or self.start >= self.end:
+            raise ValueError(HOURS_MSG)
+        return self

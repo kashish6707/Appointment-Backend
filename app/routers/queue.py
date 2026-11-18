@@ -5,6 +5,7 @@ Every change locks the session row first (the same lock bookings take), so a dou
 """
 
 import uuid
+from datetime import timedelta
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from sqlalchemy import select
@@ -13,7 +14,7 @@ from app import bookings, notifications, notify
 from app.access import Actor, CanAddWalkIns, CanCall, CanManageOpd, CanSetOutcome, audit
 from app.deps import Db
 from app.models import Booking, DoctorClinic, OpdSession
-from app.schemas import BookingStatusIn, WalkInIn
+from app.schemas import BookingStatusIn, BreakIn, ExtendBreakIn, WalkInIn
 from app.serializers import booking_item, session_json
 from app.timeutil import now_ist, today_ist
 
@@ -69,13 +70,32 @@ def start(session_id: uuid.UUID, actor: CanManageOpd, db: Db, background: Backgr
 
 
 @router.post("/sessions/{session_id}/pause")
-def pause(session_id: uuid.UUID, actor: CanManageOpd, db: Db):
+def pause(session_id: uuid.UUID, actor: CanManageOpd, db: Db, body: BreakIn | None = None):
+    """Take a break of a set length. Waiting patients' expected times move by it."""
+    body = body or BreakIn()
     session = _lock_session(db, actor, session_id)
     _require_today(session)
     if session.status != "IN_OPD":
         raise HTTPException(409, "You can only take a break while OPD is running.")
     session.status = "ON_BREAK"
+    session.break_started_at = now_ist()
+    session.break_until = session.break_started_at + timedelta(minutes=body.minutes)
+    audit(db, actor, "opd.break_planned", f"session:{session.id}", minutes=body.minutes)
     return _finish(session, actor, db, "opd.pause")
+
+
+@router.post("/sessions/{session_id}/break/extend")
+def extend_break(session_id: uuid.UUID, body: ExtendBreakIn, actor: CanManageOpd, db: Db):
+    """Make the break longer. Counts from its planned end, or from now if that has passed."""
+    session = _lock_session(db, actor, session_id)
+    _require_today(session)
+    if session.status != "ON_BREAK" or session.break_until is None:
+        raise HTTPException(409, "OPD isn't on a break.")
+    start = max(session.break_until, now_ist())
+    session.break_until = start + timedelta(minutes=body.minutes)
+    if session.break_until - session.break_started_at > timedelta(hours=4):
+        raise HTTPException(409, "A break can't be longer than 4 hours. End OPD instead.")
+    return _finish(session, actor, db, "opd.break_extended")
 
 
 @router.post("/sessions/{session_id}/resume")
@@ -85,6 +105,8 @@ def resume(session_id: uuid.UUID, actor: CanManageOpd, db: Db):
     if session.status != "ON_BREAK":
         raise HTTPException(409, "OPD isn't on a break.")
     session.status = "IN_OPD"
+    session.break_started_at = None
+    session.break_until = None
     return _finish(session, actor, db, "opd.resume")
 
 
@@ -100,6 +122,8 @@ def end(session_id: uuid.UUID, actor: CanManageOpd, db: Db):
         raise HTTPException(409, CLOSED)
     session.status = "CLOSED"
     session.closed_at = now_ist()
+    session.break_started_at = None
+    session.break_until = None
     finished = _complete_current(db, session, at=session.closed_at)
     result = _finish(session, actor, db, "opd.end")
     for booking in finished:

@@ -10,6 +10,7 @@ TEST_DATABASE_URL = os.environ.get(
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["PAYMENT_GATEWAY"] = "fake"
 os.environ["NOTIFY_CHANNEL"] = "fake"
+os.environ["AUTO_VERIFY_DOCTORS"] = "false"  # tests turn it on where needed
 
 import pytest  # noqa: E402
 from alembic import command  # noqa: E402
@@ -49,7 +50,8 @@ def database():
 
 @pytest.fixture(autouse=True)
 def clean_tables():
-    tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
+    # Reference data filled in by migrations (the list of areas) stays.
+    tables = ", ".join(t.name for t in Base.metadata.sorted_tables if t.name != "areas")
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
     yield
@@ -148,3 +150,13 @@ def profile_body(**overrides) -> dict:
         "photo": "data:image/jpeg;base64," + base64.b64encode(JPEG).decode(),
         **overrides,
     }
+
+
+@pytest.fixture(autouse=True)
+def fresh_directory_cache():
+    """The clinic status cache (30 s) must not carry over between tests."""
+    from app import directory
+
+    directory.clear_cache()
+    yield
+    directory.clear_cache()

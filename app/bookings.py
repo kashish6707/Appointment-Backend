@@ -296,11 +296,17 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
         found = wait_estimates(db, session, [ahead])[0]
         if found:
             estimate, expected_at = found
+    # Who is with the doctor right now (not just the last token called, which stays after
+    # that patient is marked seen).
+    with_doctor = db.scalar(
+        select(Booking.token).where(Booking.session_id == session.id, Booking.status == "WITH_DOCTOR").order_by(Booking.token).limit(1)
+    )
     return {
         "bookingId": str(booking.id),
         "token": booking.token,
         "status": booking.status,
         "nowServing": session.current_token,
+        "withDoctor": with_doctor,
         "patientsAhead": ahead,
         "estimatedMinutes": estimate,
         "sessionStatus": session.status,

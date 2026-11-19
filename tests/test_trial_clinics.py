@@ -137,3 +137,29 @@ def test_realtime_ticket_is_single_use_and_needs_sign_in(client):
     assert rooms[0].startswith("doctor:") and staff is None
     assert realtime._use_ticket(ticket) is None  # used up
     assert realtime._use_ticket("made-up") is None
+
+
+def test_tracking_says_who_is_with_the_doctor(client, make_slot):
+    slot = make_slot()
+    doctor = sign_in(client, slot.doctor.phone, "secret123")
+
+    def book(name, phone):
+        r = client.post("/api/public/bookings", json={
+            "doctorClinicId": str(slot.id), "date": today_ist().isoformat(), "visitType": "NEW",
+            "patient": {"name": name, "phone": phone, "age": 40, "gender": "MALE"}, "recordsConsent": False})
+        return r.json()
+
+    first, second = book("Asha Devi", "9431000001"), book("Binod Kumar", "9431000002")
+    track = lambda: client.get(f"/api/public/bookings/{second['bookingId']}", params={"code": second["trackingCode"]}).json()
+    session_id = track()["sessionId"]
+    assert track()["withDoctor"] is None and track()["patientsAhead"] == 1
+
+    client.post(f"/api/doctor/sessions/{session_id}/start", headers=doctor, json={})
+    client.post(f"/api/doctor/sessions/{session_id}/next", headers=doctor, json={})
+    data = track()
+    assert data["withDoctor"] == 1 and data["patientsAhead"] == 0
+
+    # Token 1 marked seen without calling the next one: nobody is with the doctor.
+    client.patch(f"/api/doctor/bookings/{first['bookingId']}/status", headers=doctor, json={"status": "DONE"})
+    data = track()
+    assert data["withDoctor"] is None and data["nowServing"] == 1

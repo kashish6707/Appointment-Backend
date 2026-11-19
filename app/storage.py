@@ -88,6 +88,12 @@ def get_storage() -> Storage:
     return _db() if settings.storage_backend == "db" else _local(settings.media_dir)
 
 
+def get_record_storage() -> Storage:
+    """Prescriptions and reports: never public. Locally they live under RECORDS_DIR."""
+    settings = get_settings()
+    return _db() if settings.storage_backend == "db" else _local(settings.records_dir)
+
+
 @lru_cache
 def _local(root: str) -> LocalStorage:
     return LocalStorage(root)

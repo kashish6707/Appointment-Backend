@@ -482,6 +482,20 @@ Body `{ code, reason? }`. **200** `{ bookingId, status: "CANCELLED", refund: { a
 ### `GET /api/health`
 - **200** `{ "status": "ok" }` after `SELECT 1`, or **503** if the database is unreachable
 
+## Patient accounts
+
+Routes under `/api/patient` (app/routers/patient.py). Cookie `clinically_patient`, separate from doctors' `clinically_session`, so one browser can hold both.
+
+- `POST /auth/register` `{ fullName, method: phone|email, phone|email, password }` → **201** `{ account, members }`, signed in. Creates the patient's own profile (`relation: SELF`).
+- `POST /auth/login`, `POST /auth/logout`, `GET /me`. Sign-in failures are rate-limited like doctors' (counted separately).
+- `POST /auth/forgot` `{ email }` always answers the same; if the account exists, a one-hour, one-use link to `SITE_URL/reset-password?token=…` is emailed (`EMAIL_CHANNEL`: log, fake, resend). `POST /auth/reset` `{ token, password }` sets it and signs out every other device. Phone-only accounts can't reset by themselves yet (no SMS).
+- Family profiles: `POST /members`, `PUT /members/{id}` (whole profile), `DELETE /members/{id}` (not SELF; deletes files they uploaded, clinics keep their visit history). Up to 8. Fields: name, relation, phone, dateOfBirth or age, gender, height, weight, bloodGroup, allergies, conditions, surgeries, medicines, emergency contact, address, recordsConsent.
+- Records: `GET|POST /members/{id}/records` (`{ kind: PRESCRIPTION|REPORT, title, date, file: data URL }`, JPEG/PNG/WebP/PDF checked by their bytes, 5 MB), `GET /records/{id}/file`, `DELETE /records/{id}` (patient-added only). Stored with `get_record_storage()`: `RECORDS_DIR` locally, Postgres with `STORAGE_BACKEND=db`.
+- Bookings: `GET /bookings` (every profile, newest 50). `POST /bookings/{id}/link` gives this device its own tracking code (`tracking_links`); earlier links keep working. `POST /api/public/bookings` with `memberId` (signed in) books for that profile and updates its name, age, gender and consent.
+- Doctors see a profile's health details (`health` in the booking detail) and records only with that profile's consent.
+
+**Safety rules:** phone numbers aren't verified, so a new account never picks up earlier bookings or records with the same number, and guest bookings never match a profile in an account (`find_or_create_patient` skips them). Everything is scoped to the signed-in account; other ids answer 404.
+
 ## Free trial rollout
 
 - **Registration** sets `trial_ends_at` to now + `TRIAL_DAYS` (90). `GET /api/doctor/me` returns it as `doctor.trialEndsAt` to the doctor only (null for staff). Nothing is locked when it passes; the dashboard shows a banner.

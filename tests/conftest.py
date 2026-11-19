@@ -11,6 +11,7 @@ os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["PAYMENT_GATEWAY"] = "fake"
 os.environ["NOTIFY_CHANNEL"] = "fake"
 os.environ["AUTO_VERIFY_DOCTORS"] = "false"  # tests turn it on where needed
+os.environ["EMAIL_CHANNEL"] = "fake"
 
 import pytest  # noqa: E402
 from alembic import command  # noqa: E402

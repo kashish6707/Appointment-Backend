@@ -4,13 +4,16 @@ import hmac
 import uuid
 from datetime import timedelta
 
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import joinedload
 
 from app import booking_payments, bookings, notifications, notify, profile, schedule, security
 from app.deps import Db
-from app.models import Booking, Clinic, Doctor, DoctorClinic, OpdSession, Payment
+from app.models import Booking, Clinic, Doctor, DoctorClinic, OpdSession, Patient, PatientAccount, Payment
+from app.routers.patient import _age_from as bookings_age, optional_account
 from app.payments import get_gateway
 from app.schemas import BookingIn, CancelIn, PaymentConfirmIn
 from app.serializers import clinic_slot
@@ -117,9 +120,11 @@ def _rupees(paise: int) -> int:
 
 
 @router.post("/bookings", status_code=201)
-def create_booking(body: BookingIn, db: Db):
+def create_booking(body: BookingIn, db: Db, account: Annotated[PatientAccount | None, Depends(optional_account)]):
     dc = bookings.get_bookable_slot(db, body.doctor_clinic_id)
     bookings.check_bookable_date(db, dc, body.date, now_ist())
+    if body.member_id is not None and account is None:
+        raise HTTPException(401, "Please sign in again to book for someone in your account.")
 
     if dc.token_amount > 0:
         # Pay first; the token is assigned when the payment is confirmed.
@@ -136,16 +141,37 @@ def create_booking(body: BookingIn, db: Db):
         }
 
     session = bookings.lock_session(db, dc.id, body.date)
-    patient = bookings.find_or_create_patient(
-        db,
-        name=body.patient.name,
-        phone=body.patient.phone,
-        age=body.patient.age,
-        gender=body.patient.gender,
-        height_cm=body.patient.height_cm,
-        weight_kg=body.patient.weight_kg,
-        records_consent=body.records_consent,
-    )
+    if body.member_id is not None:
+        # A profile in the signed-in patient's account: keep its details up to date.
+        patient = db.scalar(
+            select(Patient).where(Patient.id == body.member_id, Patient.account_id == account.id).with_for_update()
+        )
+        if patient is None:
+            raise HTTPException(404, "We couldn't find that profile in your account.")
+        p = body.patient
+        patient.name, patient.age, patient.gender = p.name, p.age, p.gender
+        patient.phone = patient.phone or p.phone
+        if p.height_cm is not None:
+            patient.height_cm = p.height_cm
+        if p.weight_kg is not None:
+            patient.weight_kg = p.weight_kg
+        if body.records_consent and patient.records_consent_at is None:
+            patient.records_consent_at = now_ist()
+        elif not body.records_consent:
+            patient.records_consent_at = None
+        if patient.date_of_birth is not None and patient.age != bookings_age(patient.date_of_birth):
+            patient.date_of_birth = None  # the age typed now wins over an old date of birth
+    else:
+        patient = bookings.find_or_create_patient(
+            db,
+            name=body.patient.name,
+            phone=body.patient.phone,
+            age=body.patient.age,
+            gender=body.patient.gender,
+            height_cm=body.patient.height_cm,
+            weight_kg=body.patient.weight_kg,
+            records_consent=body.records_consent,
+        )
     booking, code = bookings.add_booking(db, session, patient, visit_type=body.visit_type, source="ONLINE")
     db.commit()
     notify.booking_and_queue(booking, dc.doctor_id, "booking.created")

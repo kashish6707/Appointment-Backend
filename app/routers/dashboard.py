@@ -6,19 +6,20 @@ record gets the same 404 as one that doesn't exist.
 """
 
 import uuid
+from pathlib import PurePosixPath
+from urllib.parse import quote
 from calendar import monthrange
 from collections import Counter
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import joinedload
 
 from app import bookings, notifications, notify, schedule
-from app.config import get_settings
+from app.storage import get_record_storage
 from app.access import Actor, CanCorrect, CanManageTests, CanView, CanViewRecords, audit
 from app.deps import Db
 from app.models import Booking, DoctorClinic, MedicalRecord, OpdSession, Patient, PatientCorrection, TestAdvice
@@ -309,7 +310,26 @@ def booking_detail(booking_id: uuid.UUID, actor: CanView, db: Db):
         "recordsConsentAt": iso(patient.records_consent_at),
         "tests": [test_json(t) for t in tests],
         "records": [record_json(r) for r in records],
+        # What the patient wrote in their profile (blood group, allergies, conditions, ...).
+        # Same rule as records: only with their consent.
+        "health": health_json(patient) if consent and can_view_records else None,
     }
+
+
+def health_json(p: Patient) -> dict | None:
+    fields = {
+        "bloodGroup": p.blood_group,
+        "allergies": p.allergies,
+        "conditions": p.conditions,
+        "surgeries": p.surgeries,
+        "medicines": p.medicines,
+        "emergencyContact": (
+            {"name": p.emergency_name, "relation": p.emergency_relation, "phone": p.emergency_phone}
+            if p.emergency_name or p.emergency_phone else None
+        ),
+        "updatedAt": iso(p.profile_updated_at),
+    }
+    return fields if any(v for k, v in fields.items() if k != "updatedAt") else None
 
 
 # --- tests advised ----------------------------------------------------------------------
@@ -382,18 +402,25 @@ def record_file(record_id: uuid.UUID, actor: CanViewRecords, db: Db):
     if record is None:
         raise HTTPException(404, FILE_NOT_FOUND)
 
-    root = Path(get_settings().records_dir).resolve()
-    path = (root / record.file_key).resolve()
-    if not path.is_relative_to(root) or not path.is_file():
-        raise HTTPException(404, FILE_NOT_FOUND)
+    return record_response(record)
 
+
+def record_response(record: MedicalRecord) -> Response:
+    """A record's file: shown in the browser if it's a safe type, otherwise downloaded."""
+    data = get_record_storage().get(record.file_key)
+    if data is None:
+        raise HTTPException(404, FILE_NOT_FOUND)
     inline = record.content_type in INLINE_TYPES
-    return FileResponse(
-        path,
+    suffix = PurePosixPath(record.file_key).suffix
+    filename = quote(f"{record.title[:80]}{suffix}")
+    return Response(
+        data,
         media_type=record.content_type if inline else "application/octet-stream",
-        content_disposition_type="inline" if inline else "attachment",
-        filename=f"{record.title[:80]}{path.suffix}",
-        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+        headers={
+            "Content-Disposition": f"{'inline' if inline else 'attachment'}; filename*=utf-8''{filename}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

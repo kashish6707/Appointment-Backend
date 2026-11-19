@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import notifications, realtime
 from app.db import engine
-from app.routers import auth, clinics, dashboard, directory, doctor, payments, profile, public, queue, schedule, staff
+from app.routers import auth, clinics, dashboard, directory, doctor, patient, payments, profile, public, queue, schedule, staff
 from app.schemas import FIELD_MSGS, METHOD_MSG
 
 log = logging.getLogger("clinically")
@@ -58,6 +58,7 @@ api.include_router(schedule.router)
 api.include_router(profile.router)
 api.include_router(directory.router)
 api.include_router(clinics.router)
+api.include_router(patient.router)
 
 
 def error(status: int, message: str) -> JSONResponse:

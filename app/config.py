@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     # "fake" keeps them in memory (tests). A real SMS/WhatsApp sender plugs in here (app/messaging.py).
     notify_channel: Literal["log", "fake"] = "log"
 
+    # Emails (password reset links): "log", "fake" (tests) or "resend". See app/email.py.
+    email_channel: Literal["log", "fake", "resend"] = "log"
+    resend_api_key: str = ""
+    email_from: str = "Clinically <onboarding@resend.dev>"
+    # The website's public address, used in links sent by email.
+    site_url: str = "http://localhost:3000"
+
     # "fake" needs no keys and is for local dev and tests only.
     payment_gateway: Literal["razorpay", "fake"] = "razorpay"
     razorpay_key_id: str = ""

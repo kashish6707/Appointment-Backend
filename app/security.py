@@ -7,7 +7,8 @@ from argon2.exceptions import InvalidHashError, VerificationError
 
 from app.config import get_settings
 
-COOKIE_NAME = "clinically_session"
+COOKIE_NAME = "clinically_session"  # doctors and staff
+PATIENT_COOKIE = "clinically_patient"  # patient accounts (separate, so both can be signed in)
 
 _hasher = PasswordHasher()  # argon2id with the library's recommended parameters
 # Verified against when the account doesn't exist, so timing doesn't reveal that.
@@ -37,9 +38,9 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _cookie(value: str, max_age: int) -> str:
+def _cookie(value: str, max_age: int, name: str = COOKIE_NAME) -> str:
     # Built by hand so the attributes match the frontend contract exactly. No Domain, ever.
-    cookie = f"{COOKIE_NAME}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}"
+    cookie = f"{name}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}"
     if get_settings().cookie_secure:
         cookie += "; Secure"
     return cookie
@@ -51,6 +52,14 @@ def session_cookie(token: str) -> str:
 
 def cleared_cookie() -> str:
     return _cookie("", 0)
+
+
+def patient_cookie(token: str) -> str:
+    return _cookie(token, get_settings().session_ttl_days * 24 * 60 * 60, PATIENT_COOKIE)
+
+
+def cleared_patient_cookie() -> str:
+    return _cookie("", 0, PATIENT_COOKIE)
 
 
 def new_tracking_code() -> str:

@@ -247,6 +247,9 @@ class PatientIn(_Body):
 
 class BookingIn(_Body):
     doctor_clinic_id: uuid.UUID = Field(alias="doctorClinicId")
+    # Signed-in patients: which profile in their account. Its name, age and gender are updated
+    # from `patient`.
+    member_id: uuid.UUID | None = Field(None, alias="memberId")
     date: BookingDate
     visit_type: VisitType = Field(alias="visitType")
     patient: PatientIn
@@ -716,4 +719,141 @@ class ClinicCreateIn(_Body):
             raise ValueError("Choose each OPD day once.")
         if self.start is None or self.end is None or self.start >= self.end:
             raise ValueError(HOURS_MSG)
+        return self
+
+
+# --- patient accounts ----------------------------------------------------------------
+
+class PatientRegisterPhone(_Body):
+    full_name: FullName = Field(alias="fullName")
+    method: Literal["phone"]
+    phone: Phone
+    password: NewPassword
+
+
+class PatientRegisterEmail(_Body):
+    full_name: FullName = Field(alias="fullName")
+    method: Literal["email"]
+    email: Email
+    password: NewPassword
+
+
+PatientRegisterBody = Union[PatientRegisterPhone, PatientRegisterEmail]
+
+
+class ForgotPasswordIn(_Body):
+    email: Email
+
+
+class ResetPasswordIn(_Body):
+    token: str = Field(min_length=10, max_length=200)
+    password: NewPassword
+
+
+def _free_text(max_len: int, label: str):
+    """Optional text in the patient's own words. Empty means not filled in."""
+
+    def check(v: object) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError(f"Enter {label} as text.")
+        v = v.strip()
+        if len(v) > max_len:
+            raise ValueError(f"Keep {label} under {max_len} characters.")
+        return v or None
+
+    return check
+
+
+def _birth_date(v: object) -> date | None:
+    if v is None or v == "":
+        return None
+    d = _date(v)
+    today = date.today()
+    if d > today or d.year < today.year - 120:
+        raise ValueError("Enter a real date of birth.")
+    return d
+
+
+def _optional_age(v: object) -> int | None:
+    return None if v is None else _age(v)
+
+
+RELATION_VALUES = Literal["SELF", "SPOUSE", "MOTHER", "FATHER", "SON", "DAUGHTER", "BROTHER", "SISTER", "GRANDPARENT", "OTHER"]
+BLOOD_GROUP_VALUES = Literal["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
+LongText = Annotated[str | None, BeforeValidator(_free_text(1000, "this"))]
+
+
+class MemberIn(_Body):
+    """A family profile, sent whole: fields left out are cleared."""
+
+    name: PatientName
+    relation: RELATION_VALUES
+    phone: Annotated[str | None, BeforeValidator(_optional_phone)] = None  # their own; else the account's
+    date_of_birth: Annotated[date | None, BeforeValidator(_birth_date)] = Field(None, alias="dateOfBirth")
+    age: Annotated[int | None, BeforeValidator(_optional_age)] = None
+    gender: Gender | None = None
+    height_cm: HeightCm = Field(None, alias="heightCm")
+    weight_kg: WeightKg = Field(None, alias="weightKg")
+    blood_group: BLOOD_GROUP_VALUES | None = Field(None, alias="bloodGroup")
+    allergies: LongText = None
+    conditions: LongText = None
+    surgeries: LongText = None
+    medicines: LongText = None
+    emergency_name: Annotated[str | None, BeforeValidator(_free_text(100, "the emergency contact's name"))] = Field(None, alias="emergencyName")
+    emergency_relation: Annotated[str | None, BeforeValidator(_free_text(40, "the relation"))] = Field(None, alias="emergencyRelation")
+    emergency_phone: Annotated[str | None, BeforeValidator(_optional_phone)] = Field(None, alias="emergencyPhone")
+    address_area: Annotated[str | None, BeforeValidator(_free_text(100, "the area"))] = Field(None, alias="addressArea")
+    address_city: Annotated[str | None, BeforeValidator(_free_text(60, "the city"))] = Field(None, alias="addressCity")
+    records_consent: StrictBool | None = Field(None, alias="recordsConsent")
+
+
+MAX_RECORD_BYTES = 5 * 1024 * 1024
+RECORD_FILE_MSG = "Choose a photo (JPG, PNG, WebP) or a PDF of up to 5 MB."
+
+
+def _record_file(v: object):
+    """A data URL holding a real JPEG, PNG, WebP or PDF of at most 5 MB. Returns (bytes, type)."""
+    if not isinstance(v, str) or not v.startswith("data:") or ";base64," not in v[:60]:
+        raise ValueError(RECORD_FILE_MSG)
+    encoded = v.split(";base64,", 1)[1]
+    if len(encoded) > MAX_RECORD_BYTES * 4 // 3 + 4:
+        raise ValueError(RECORD_FILE_MSG)
+    try:
+        data = _base64.b64decode(encoded, validate=True)
+    except (_binascii.Error, ValueError):
+        raise ValueError(RECORD_FILE_MSG) from None
+    if data.startswith(b"\xff\xd8\xff"):
+        kind = "image/jpeg"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        kind = "image/png"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        kind = "image/webp"
+    elif data.startswith(b"%PDF-"):
+        kind = "application/pdf"
+    else:
+        raise ValueError(RECORD_FILE_MSG)
+    if not 100 <= len(data) <= MAX_RECORD_BYTES:
+        raise ValueError(RECORD_FILE_MSG)
+    return data, kind
+
+
+def _record_date(v: object) -> date:
+    d = _date(v)
+    if d > date.today():
+        raise ValueError("The date can't be in the future.")
+    return d
+
+
+class RecordIn(_Body):
+    kind: Literal["PRESCRIPTION", "REPORT"]
+    title: Annotated[str, BeforeValidator(_free_text(120, "the title"))]
+    date: Annotated[date, BeforeValidator(_record_date)]
+    file: Annotated[tuple, BeforeValidator(_record_file)]
+
+    @model_validator(mode="after")
+    def _title(self):
+        if not self.title or len(self.title) < 2:
+            raise ValueError("Give it a title, for example \"Blood test\" or \"Dr. Sinha's prescription\".")
         return self

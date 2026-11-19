@@ -384,6 +384,54 @@ class OpdSession(Base):
 # --- patients and bookings ----------------------------------------------------
 
 
+RELATIONS = ("SELF", "SPOUSE", "MOTHER", "FATHER", "SON", "DAUGHTER", "BROTHER", "SISTER", "GRANDPARENT", "OTHER")
+BLOOD_GROUPS = ("A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-")
+
+
+class PatientAccount(Base):
+    """A patient's login. It holds profiles (Patient rows): their own and their family's.
+
+    The phone number isn't verified yet (no SMS codes), so an account never takes over bookings
+    or records made earlier with the same number.
+    """
+
+    __tablename__ = "patient_accounts"
+    __table_args__ = (CheckConstraint("phone IS NOT NULL OR email IS NOT NULL", name="patient_accounts_phone_or_email"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    full_name: Mapped[str] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(Text, unique=True)
+    email: Mapped[str | None] = mapped_column(Text, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at()
+
+
+class PatientSession(Base):
+    """A signed-in browser of a patient account. Its own cookie (clinically_patient), so a
+    doctor can be signed in as a patient on the same device too."""
+
+    __tablename__ = "patient_sessions"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    account_id: Mapped[uuid.UUID] = fk("patient_accounts.id")
+    token_hash: Mapped[str] = mapped_column(Text, unique=True)
+    created_at: Mapped[datetime] = created_at()
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PasswordReset(Base):
+    """A "forgot password" email link. Only its hash is stored; one use; expires in an hour."""
+
+    __tablename__ = "password_resets"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    account_id: Mapped[uuid.UUID] = fk("patient_accounts.id")
+    token_hash: Mapped[str] = mapped_column(Text, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = created_at()
+
+
 class Patient(Base):
     __tablename__ = "patients"
     __table_args__ = (
@@ -394,12 +442,34 @@ class Patient(Base):
     id: Mapped[uuid.UUID] = uuid_pk()
     name: Mapped[str] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(Text, index=True)  # walk-ins may have none
-    age: Mapped[int] = mapped_column(SmallInteger)
-    gender: Mapped[str] = mapped_column(Text)
+    # Always set for bookings. A family profile in a patient account may leave them empty
+    # until its first booking.
+    age: Mapped[int | None] = mapped_column(SmallInteger)
+    gender: Mapped[str | None] = mapped_column(Text)
     height_cm: Mapped[float | None] = mapped_column(Numeric(5, 1))
     weight_kg: Mapped[float | None] = mapped_column(Numeric(5, 1))
     records_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at()
+
+    # A profile in a patient's account (themselves or a family member). Guest bookings never
+    # match these rows, so nobody can add to or change someone's profile by typing their number.
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("patient_accounts.id", ondelete="SET NULL"), index=True
+    )
+    relation: Mapped[str | None] = mapped_column(Text)  # SELF, SPOUSE, MOTHER, ... (RELATIONS)
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
+    # Written by the patient, in their own words. Shown to a doctor only with records consent.
+    blood_group: Mapped[str | None] = mapped_column(Text)
+    allergies: Mapped[str | None] = mapped_column(Text)
+    conditions: Mapped[str | None] = mapped_column(Text)  # long-term conditions, e.g. diabetes, BP
+    surgeries: Mapped[str | None] = mapped_column(Text)
+    medicines: Mapped[str | None] = mapped_column(Text)
+    emergency_name: Mapped[str | None] = mapped_column(Text)
+    emergency_relation: Mapped[str | None] = mapped_column(Text)
+    emergency_phone: Mapped[str | None] = mapped_column(Text)
+    address_area: Mapped[str | None] = mapped_column(Text)
+    address_city: Mapped[str | None] = mapped_column(Text)
+    profile_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     corrections: Mapped[list["PatientCorrection"]] = relationship(lazy="selectin")
 
@@ -467,6 +537,18 @@ class Booking(Base):
 
     session: Mapped[OpdSession] = relationship()
     patient: Mapped[Patient] = relationship()
+
+
+class TrackingLink(Base):
+    """Another tracking code for a booking, made when a signed-in patient opens it on a device.
+    The booking's own code (in links already shared) keeps working."""
+
+    __tablename__ = "tracking_links"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    booking_id: Mapped[uuid.UUID] = fk("bookings.id")
+    code_hash: Mapped[str] = mapped_column(Text, unique=True)
+    created_at: Mapped[datetime] = created_at()
 
 
 class MedicalRecord(Base):

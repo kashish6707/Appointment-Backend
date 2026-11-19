@@ -28,3 +28,11 @@ services:
         value: "90"
       - key: NOTIFY_CHANNEL
         value: log
+      - key: SITE_URL # the website, used in "forgot password" email links
+        value: https://appointment-frontend-beta-six.vercel.app
+      - key: EMAIL_CHANNEL # "log" until Resend is set up; then "resend" plus the two keys below
+        value: log
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM # e.g. Clinically <no-reply@your-domain>; Resend's test sender works without a domain
+        value: Clinically <onboarding@resend.dev>

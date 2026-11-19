@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session as DbSession
 from sqlalchemy.orm import joinedload
 
 from app import schedule, security
-from app.models import WEEKDAYS, Booking, Doctor, DoctorClinic, OpdSession, Patient
+from app.models import WEEKDAYS, Booking, Doctor, DoctorClinic, OpdSession, Patient, TrackingLink
 from app.timeutil import IST, now_ist
 
 MAX_DAYS_AHEAD = 7
@@ -95,7 +95,9 @@ def find_or_create_patient(
     if phone:
         patient = db.scalar(
             select(Patient)
-            .where(Patient.phone == phone, func.lower(Patient.name) == name.lower())
+            # Never a profile in a patient account: a guest who types the same name and number
+            # mustn't add to someone's history or change their consent.
+            .where(Patient.phone == phone, func.lower(Patient.name) == name.lower(), Patient.account_id.is_(None))
             .order_by(Patient.created_at)
             .limit(1)
             .with_for_update()
@@ -213,9 +215,21 @@ def get_booking_by_code(db: DbSession, booking_id: uuid.UUID, code: str, *, lock
     if lock:
         query = query.with_for_update()
     booking = db.scalar(query)
-    if booking is None or not hmac.compare_digest(booking.tracking_code_hash, security.hash_token(code)):
+    if booking is None:
+        raise HTTPException(404, BOOKING_NOT_FOUND)
+    code_hash = security.hash_token(code)
+    if not hmac.compare_digest(booking.tracking_code_hash, code_hash) and not db.scalar(
+        select(TrackingLink.id).where(TrackingLink.booking_id == booking.id, TrackingLink.code_hash == code_hash)
+    ):
         raise HTTPException(404, BOOKING_NOT_FOUND)
     return booking
+
+
+def new_tracking_link(db: DbSession, booking: Booking) -> str:
+    """Another code for this booking (for a signed-in patient's device). Returns the code."""
+    code = security.new_tracking_code()
+    db.add(TrackingLink(booking_id=booking.id, code_hash=security.hash_token(code)))
+    return code
 
 
 def average_consult_minutes(db: DbSession, session_id: uuid.UUID) -> float:

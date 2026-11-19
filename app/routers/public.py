@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import joinedload
 
@@ -120,7 +120,9 @@ def _rupees(paise: int) -> int:
 
 
 @router.post("/bookings", status_code=201)
-def create_booking(body: BookingIn, db: Db, account: Annotated[PatientAccount | None, Depends(optional_account)]):
+def create_booking(
+    body: BookingIn, db: Db, background: BackgroundTasks, account: Annotated[PatientAccount | None, Depends(optional_account)]
+):
     dc = bookings.get_bookable_slot(db, body.doctor_clinic_id)
     bookings.check_bookable_date(db, dc, body.date, now_ist())
     if body.member_id is not None and account is None:
@@ -173,7 +175,12 @@ def create_booking(body: BookingIn, db: Db, account: Annotated[PatientAccount | 
             records_consent=body.records_consent,
         )
     booking, code = bookings.add_booking(db, session, patient, visit_type=body.visit_type, source="ONLINE")
+    booking.whatsapp_opt_in = body.whatsapp
+    booking.lang = body.lang
+    notifications.queue_booked(db, booking, code, patient.name)
+    notifications.queue_progress(db, session)  # OPD already running: they may be next already
     db.commit()
+    background.add_task(notifications.deliver_due)
     notify.booking_and_queue(booking, dc.doctor_id, "booking.created")
     return {"bookingId": str(booking.id), "token": booking.token, "trackingCode": code, "payment": None}
 
@@ -247,7 +254,7 @@ def booking_status(booking_id: uuid.UUID, db: Db, code: str = ""):
 
 
 @router.post("/bookings/{booking_id}/cancel")
-def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db):
+def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db, background: BackgroundTasks):
     if db.get(Booking, booking_id) is None:
         # Not paid yet: cancel the pending payment so a late payment gets refunded, not booked.
         payment = booking_payments.lock_by_booking(db, booking_id, body.code)
@@ -274,7 +281,9 @@ def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db):
     refundable = payment is not None and payment.status == "PAID" and session.status == "NOT_STARTED"
     if refundable:
         booking_payments.mark_for_refund(payment, "Cancelled by patient before OPD started")
+    notifications.queue_progress(db, session)  # the patients after them moved up
     db.commit()
+    background.add_task(notifications.deliver_due)
     notify.booking_and_queue(booking, doctor_id, "booking.cancelled")
 
     refund = None

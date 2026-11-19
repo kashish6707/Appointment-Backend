@@ -12,6 +12,7 @@ from tests.test_queue import J, act, opd  # noqa: F401  (opd is a fixture)
 @pytest.fixture(autouse=True)
 def fake_sender():
     _fake.sent.clear()
+    _fake.messages.clear()
     _fake.fail = False
     yield _fake
     _fake.fail = False
@@ -33,13 +34,14 @@ def test_start_opd_tells_every_waiting_patient(client, opd, db, fake_sender):
     # The reply is sent before the messages go out in the background.
     assert r.json()["notifications"] == {"pending": 2, "sent": 0, "failed": 0, "skipped": 1}
 
-    phones = [p for p, _ in fake_sender.sent]
-    assert phones == ["9431000001", "9431000002"]
-    first, second = (t for _, t in fake_sender.sent)
-    assert "has started OPD at Test Clinic" in first and "Your token is 1." in first and "You're next" in first
-    assert "Your token is 2." in second and "1 patient before you." in second
+    started = [m for m in fake_sender.messages if m.template == "clinically_opd_started"]
+    assert [m.phone for m in started] == ["9431000001", "9431000002"]
+    first, second = (m.body for m in started)
+    assert "has started OPD at Test Clinic" in first and "Your token is 1." in first and "Patients before you: 0." in first
+    assert "Your token is 2." in second and "Patients before you: 1." in second
+    assert "/track/" in first and "?code=" in first  # a working live link
 
-    rows = db.execute(text("SELECT status, channel FROM notifications ORDER BY created_at")).all()
+    rows = db.execute(text("SELECT status, channel FROM notifications WHERE kind = 'OPD_STARTED' ORDER BY created_at")).all()
     assert sorted(rows) == [("SENT", "fake"), ("SENT", "fake"), ("SKIPPED", None)]
 
     day = client.get("/api/doctor/dashboard", headers=opd["auth"]).json()
@@ -51,8 +53,9 @@ def test_patient_sees_the_message_on_their_booking_page(client, opd):
     b = opd["bookings"][0]
     status = client.get(f"/api/public/bookings/{b['bookingId']}?code={b['trackingCode']}").json()
     assert status["sessionStatus"] == "IN_OPD" and status["sessionStartedAt"] is not None
-    [message] = status["messages"]
-    assert message["kind"] == "OPD_STARTED" and message["status"] == "SENT" and "Your token is 1." in message["text"]
+    booked, started = status["messages"]  # the "you're next" this covers isn't listed
+    assert booked["kind"] == "BOOKED" and "your token number is 1" in booked["text"]
+    assert started["kind"] == "OPD_STARTED" and started["status"] == "SENT" and "Your token is 1." in started["text"]
 
 
 def test_each_patient_is_told_only_once(client, opd, db, fake_sender):
@@ -64,14 +67,16 @@ def test_each_patient_is_told_only_once(client, opd, db, fake_sender):
         assert notifications.queue_opd_started(s, session) == 0
         s.commit()
     notifications.deliver_due()
-    assert len(fake_sender.sent) == 3
-    assert db.scalar(text("SELECT count(*) FROM notifications")) == 3
+    assert sum(m.template == "clinically_opd_started" for m in fake_sender.messages) == 3
+    assert db.scalar(text("SELECT count(*) FROM notifications WHERE kind = 'OPD_STARTED'")) == 3
 
 
 def test_failed_sends_are_retried_then_given_up(client, opd, db, fake_sender):
+    with db.begin():
+        db.execute(text("DELETE FROM notifications"))  # the "token booked" ones
     fake_sender.fail = True
     act(client, opd, "start")
-    row = db.execute(text("SELECT status, attempts, last_error, next_attempt_at > now() FROM notifications LIMIT 1")).one()
+    row = db.execute(text("SELECT status, attempts, last_error, next_attempt_at > now() FROM notifications WHERE status <> 'SKIPPED' LIMIT 1")).one()
     db.commit()
     assert row == ("PENDING", 1, "Provider unavailable (test)", True)
 
@@ -81,7 +86,7 @@ def test_failed_sends_are_retried_then_given_up(client, opd, db, fake_sender):
         with db.begin():
             db.execute(text("UPDATE notifications SET next_attempt_at = now() - interval '1 second'"))
         notifications.deliver_due()
-    assert set(db.execute(text("SELECT status, attempts FROM notifications")).all()) == {("FAILED", 5)}
+    assert set(db.execute(text("SELECT status, attempts FROM notifications WHERE status <> 'SKIPPED'")).all()) == {("FAILED", 5)}
     db.commit()
 
     # A provider coming back doesn't resend FAILED ones; PENDING ones go out.
@@ -90,13 +95,15 @@ def test_failed_sends_are_retried_then_given_up(client, opd, db, fake_sender):
 
 
 def test_recovery_sends_after_a_failure(client, opd, db, fake_sender):
+    with db.begin():
+        db.execute(text("DELETE FROM notifications"))
     fake_sender.fail = True
     act(client, opd, "start")
     fake_sender.fail = False
     with db.begin():
         db.execute(text("UPDATE notifications SET next_attempt_at = now() - interval '1 second'"))
     assert notifications.deliver_due() == 3
-    assert {s for (s,) in db.execute(text("SELECT status FROM notifications")).all()} == {"SENT"}
+    assert {s for (s,) in db.execute(text("SELECT status FROM notifications WHERE status <> 'SKIPPED'")).all()} == {"SENT"}
 
 
 def test_demo_day_starts_not_started(db):

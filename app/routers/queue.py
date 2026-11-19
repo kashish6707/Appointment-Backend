@@ -70,7 +70,7 @@ def start(session_id: uuid.UUID, actor: CanManageOpd, db: Db, background: Backgr
 
 
 @router.post("/sessions/{session_id}/pause")
-def pause(session_id: uuid.UUID, actor: CanManageOpd, db: Db, body: BreakIn | None = None):
+def pause(session_id: uuid.UUID, actor: CanManageOpd, db: Db, background: BackgroundTasks, body: BreakIn | None = None):
     """Take a break of a set length. Waiting patients' expected times move by it."""
     body = body or BreakIn()
     session = _lock_session(db, actor, session_id)
@@ -81,6 +81,8 @@ def pause(session_id: uuid.UUID, actor: CanManageOpd, db: Db, body: BreakIn | No
     session.break_started_at = now_ist()
     session.break_until = session.break_started_at + timedelta(minutes=body.minutes)
     audit(db, actor, "opd.break_planned", f"session:{session.id}", minutes=body.minutes)
+    notifications.queue_break(db, session)
+    background.add_task(notifications.deliver_due)
     return _finish(session, actor, db, "opd.pause")
 
 
@@ -99,7 +101,7 @@ def extend_break(session_id: uuid.UUID, body: ExtendBreakIn, actor: CanManageOpd
 
 
 @router.post("/sessions/{session_id}/resume")
-def resume(session_id: uuid.UUID, actor: CanManageOpd, db: Db):
+def resume(session_id: uuid.UUID, actor: CanManageOpd, db: Db, background: BackgroundTasks):
     session = _lock_session(db, actor, session_id)
     _require_today(session)
     if session.status != "ON_BREAK":
@@ -107,11 +109,13 @@ def resume(session_id: uuid.UUID, actor: CanManageOpd, db: Db):
     session.status = "IN_OPD"
     session.break_started_at = None
     session.break_until = None
+    notifications.queue_progress(db, session)
+    background.add_task(notifications.deliver_due)
     return _finish(session, actor, db, "opd.resume")
 
 
 @router.post("/sessions/{session_id}/end")
-def end(session_id: uuid.UUID, actor: CanManageOpd, db: Db):
+def end(session_id: uuid.UUID, actor: CanManageOpd, db: Db, background: BackgroundTasks):
     """Close the session (any date: this is also how a doctor closes a future day for bookings).
 
     The patient currently with the doctor is marked DONE. Waiting patients are left as they are.
@@ -120,6 +124,9 @@ def end(session_id: uuid.UUID, actor: CanManageOpd, db: Db):
     session = _lock_session(db, actor, session_id)
     if session.status == "CLOSED":
         raise HTTPException(409, CLOSED)
+    if session.date == today_ist() and session.status != "NOT_STARTED":
+        notifications.queue_closed(db, session)  # patients still waiting today
+        background.add_task(notifications.deliver_due)
     session.status = "CLOSED"
     session.closed_at = now_ist()
     session.break_started_at = None
@@ -184,7 +191,7 @@ def _complete_current(db: Db, session: OpdSession, at=None) -> list[Booking]:
 
 
 @router.post("/sessions/{session_id}/next")
-def call_next(session_id: uuid.UUID, actor: CanCall, db: Db):
+def call_next(session_id: uuid.UUID, actor: CanCall, db: Db, background: BackgroundTasks):
     """Mark the patient with the doctor as DONE and call the lowest waiting token."""
     session = _lock_session(db, actor, session_id)
     _require_today(session)
@@ -208,7 +215,9 @@ def call_next(session_id: uuid.UUID, actor: CanCall, db: Db):
         called.called_at = now_ist()
         session.current_token = called.token
     audit(db, actor, "queue.next", f"session:{session.id}", token=called.token if called else None)
+    notifications.queue_progress(db, session)
     db.commit()
+    background.add_task(notifications.deliver_due)
 
     for booking in [*finished, *([called] if called else [])]:
         notify.booking_changed(booking, actor.doctor.id)
@@ -221,7 +230,7 @@ def call_next(session_id: uuid.UUID, actor: CanCall, db: Db):
 
 
 @router.post("/bookings/{booking_id}/call")
-def call_patient(booking_id: uuid.UUID, actor: CanCall, db: Db):
+def call_patient(booking_id: uuid.UUID, actor: CanCall, db: Db, background: BackgroundTasks):
     """Like "next", but for one chosen waiting patient (e.g. called out of turn)."""
     session_id = db.scalar(
         select(Booking.session_id)
@@ -248,7 +257,9 @@ def call_patient(booking_id: uuid.UUID, actor: CanCall, db: Db):
     called.called_at = now_ist()
     session.current_token = called.token
     audit(db, actor, "queue.call", f"booking:{called.id}", token=called.token)
+    notifications.queue_progress(db, session)
     db.commit()
+    background.add_task(notifications.deliver_due)
 
     for booking in [*finished, called]:
         notify.booking_changed(booking, actor.doctor.id)
@@ -274,7 +285,7 @@ def apply_outcome(booking: Booking, status: str) -> bool:
 
 
 @router.patch("/bookings/{booking_id}/status")
-def set_status(booking_id: uuid.UUID, body: BookingStatusIn, actor: CanSetOutcome, db: Db):
+def set_status(booking_id: uuid.UUID, body: BookingStatusIn, actor: CanSetOutcome, db: Db, background: BackgroundTasks):
     """Record the outcome: DONE, SENT_FOR_TESTS or NO_SHOW. Also used to correct a mistake."""
     booking = db.scalar(
         select(Booking)
@@ -291,13 +302,15 @@ def set_status(booking_id: uuid.UUID, body: BookingStatusIn, actor: CanSetOutcom
     old = booking.status
     if apply_outcome(booking, body.status):
         audit(db, actor, "booking.status", f"booking:{booking.id}", token=booking.token, old=old, new=body.status)
+        notifications.queue_progress(db, booking.session)  # e.g. a waiting patient marked no-show
         db.commit()
+        background.add_task(notifications.deliver_due)
         notify.booking_and_queue(booking, actor.doctor.id, "booking.updated")
     return booking_item(booking)
 
 
 @router.post("/sessions/{session_id}/walk-ins", status_code=201)
-def add_walk_in(session_id: uuid.UUID, body: WalkInIn, actor: CanAddWalkIns, db: Db):
+def add_walk_in(session_id: uuid.UUID, body: WalkInIn, actor: CanAddWalkIns, db: Db, background: BackgroundTasks):
     """Reception adds a patient at the desk. They pay in full there; no online payment."""
     session = _lock_session(db, actor, session_id)
     _require_today(session, "Walk-ins can only be added to today's OPD.")
@@ -307,7 +320,12 @@ def add_walk_in(session_id: uuid.UUID, body: WalkInIn, actor: CanAddWalkIns, db:
     booking, code = bookings.add_booking(
         db, session, patient, visit_type=body.visit_type, source="WALK_IN", allow_over_limit=body.over_limit
     )
+    booking.whatsapp_opt_in = body.whatsapp and bool(body.phone)
+    booking.lang = body.lang
     audit(db, actor, "walkin.add", f"booking:{booking.id}", token=booking.token, name=patient.name, overLimit=body.over_limit)
+    notifications.queue_booked(db, booking, code, patient.name)
+    notifications.queue_progress(db, session)
     db.commit()
+    background.add_task(notifications.deliver_due)
     notify.booking_and_queue(booking, actor.doctor.id, "booking.created")
     return {"booking": booking_item(booking), "trackingCode": code}

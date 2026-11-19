@@ -5,6 +5,7 @@ with 409 code HAS_BOOKINGS (and how many), unless it says confirmCancel: those b
 cancelled as "Doctor unavailable" and online token payments refunded.
 """
 
+import threading
 import uuid
 from datetime import date, timedelta
 
@@ -12,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.orm import joinedload
 
-from app import booking_payments, notify, schedule
+from app import booking_payments, notifications, notify, schedule
 from app.access import Actor, CanManageSchedule, audit
 from app.bookings import MAX_DAYS_AHEAD
 from app.deps import Db
@@ -112,7 +113,10 @@ def _apply(db: Db, actor: Actor, dc: DoctorClinic, confirm: bool, action: str, *
             booking_payments.mark_for_refund(payment, UNAVAILABLE_REASON)
             refunds.append(payment)
     audit(db, actor, action, f"clinic:{dc.id}", cancelled=len(affected), **detail)
+    notifications.queue_cancelled(db, affected)
     db.commit()
+    if affected:
+        threading.Thread(target=notifications.deliver_due, daemon=True).start()
 
     for b in affected:
         notify.booking_and_queue(b, actor.doctor.id, "booking.cancelled")

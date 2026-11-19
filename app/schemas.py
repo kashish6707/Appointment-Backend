@@ -254,6 +254,9 @@ class BookingIn(_Body):
     visit_type: VisitType = Field(alias="visitType")
     patient: PatientIn
     records_consent: StrictBool = Field(alias="recordsConsent")
+    # Token updates on WhatsApp at the patient's number, and the language to send them in.
+    whatsapp: StrictBool = True
+    lang: Literal["en", "hi"] = "en"
 
 
 class CancelIn(_Body):
@@ -287,6 +290,9 @@ class WalkInIn(_Body):
     visit_type: VisitType = Field("NEW", alias="visitType")
     # The desk confirmed adding a patient after the day's limit was reached.
     over_limit: StrictBool = Field(False, alias="overLimit")
+    # The patient agreed to token updates on WhatsApp (only with a mobile number).
+    whatsapp: StrictBool = True
+    lang: Literal["en", "hi"] = "en"
 
 
 class BookingStatusIn(_Body):

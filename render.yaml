@@ -26,8 +26,12 @@ services:
         value: "true"
       - key: TRIAL_DAYS
         value: "90"
-      - key: NOTIFY_CHANNEL
+      - key: NOTIFY_CHANNEL # "log" until WhatsApp is set up, then "whatsapp"
         value: log
+      - key: WHATSAPP_TOKEN # permanent System User token from Meta Business settings
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID # WhatsApp Manager → API setup → Phone number ID
+        sync: false
       - key: SITE_URL # the website, used in "forgot password" email links
         value: https://appointment-frontend-beta-six.vercel.app
       - key: EMAIL_CHANNEL # "log" until Resend is set up; then "resend" plus the two keys below

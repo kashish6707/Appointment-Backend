@@ -534,6 +534,9 @@ class Booking(Base):
     weight_kg: Mapped[float | None] = mapped_column(Numeric(5, 1))
     # Only the SHA-256 of the patient's tracking code is stored, like session tokens.
     tracking_code_hash: Mapped[str] = mapped_column(Text, unique=True)
+    # The patient agreed to token updates on WhatsApp, and the language they booked in.
+    whatsapp_opt_in: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    lang: Mapped[str] = mapped_column(Text, default="en", server_default="en")
 
     session: Mapped[OpdSession] = relationship()
     patient: Mapped[Patient] = relationship()
@@ -637,7 +640,7 @@ class Notification(Base):
 
     __tablename__ = "notifications"
     __table_args__ = (
-        UniqueConstraint("booking_id", "kind", name="notifications_booking_kind"),
+        UniqueConstraint("booking_id", "dedupe_key", name="notifications_booking_dedupe"),
         one_of("status", NOTIFICATION_STATUSES, "notifications_status"),
         Index("ix_notifications_due", "status", "next_attempt_at"),
     )
@@ -645,9 +648,14 @@ class Notification(Base):
     id: Mapped[uuid.UUID] = uuid_pk()
     booking_id: Mapped[uuid.UUID] = fk("bookings.id")
     session_id: Mapped[uuid.UUID] = fk("opd_sessions.id")
-    kind: Mapped[str] = mapped_column(Text)  # e.g. OPD_STARTED
+    kind: Mapped[str] = mapped_column(Text)  # e.g. OPD_STARTED (app/notifications.py KINDS)
+    # Each booking gets a message once per key: the kind, or e.g. BREAK:<start time> for breaks.
+    dedupe_key: Mapped[str] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(Text)
-    body: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)  # the text, also shown on the patient's queue page
+    template: Mapped[str | None] = mapped_column(Text)  # WhatsApp template name
+    params: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")  # its {{1}}, {{2}}, …
+    lang: Mapped[str] = mapped_column(Text, default="en", server_default="en")
     status: Mapped[str] = mapped_column(Text, default="PENDING", server_default="PENDING")
     channel: Mapped[str | None] = mapped_column(Text)  # which sender delivered it: log, msg91, …
     provider_id: Mapped[str | None] = mapped_column(Text)

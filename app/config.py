@@ -27,7 +27,10 @@ class Settings(BaseSettings):
 
     # How messages reach patients. "log" only writes them to the server log (development);
     # "fake" keeps them in memory (tests). A real SMS/WhatsApp sender plugs in here (app/messaging.py).
-    notify_channel: Literal["log", "fake"] = "log"
+    notify_channel: Literal["log", "fake", "whatsapp"] = "log"
+    # WhatsApp Cloud API (Meta): a permanent System User token and the business number's id.
+    whatsapp_token: str = ""
+    whatsapp_phone_number_id: str = ""
 
     # Emails (password reset links): "log", "fake" (tests) or "resend". See app/email.py.
     email_channel: Literal["log", "fake", "resend"] = "log"

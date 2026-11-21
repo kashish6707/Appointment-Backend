@@ -79,6 +79,13 @@ class SlotStatus:
     status: str  # OPEN_NOW, OPENS_LATER, CLOSED_TODAY
     opens_at: str | None  # HH:MM, for OPENS_LATER
     waiting: int
+    session_status: str | None = None  # today's OPD: NOT_STARTED, IN_OPD, ON_BREAK, CLOSED; None: none yet
+    with_doctor: int | None = None  # the token with the doctor right now
+
+
+def forget(doctor_clinic_id) -> None:
+    """Drop one slot's cached status (its queue just changed)."""
+    _cache.pop(doctor_clinic_id, None)
 
 
 _cache: dict[uuid.UUID, tuple[float, SlotStatus]] = {}
@@ -117,18 +124,27 @@ def slot_statuses(db: DbSession, slots: list[DoctorClinic]) -> dict[uuid.UUID, S
             .group_by(OpdSession.doctor_clinic_id)
         ).all()
     )
+    with_doctor = dict(
+        db.execute(
+            select(OpdSession.doctor_clinic_id, func.min(Booking.token))
+            .join(Booking, Booking.session_id == OpdSession.id)
+            .where(OpdSession.doctor_clinic_id.in_(ids), OpdSession.date == today, Booking.status == "WITH_DOCTOR")
+            .group_by(OpdSession.doctor_clinic_id)
+        ).all()
+    )
     for dc in missing:
         plan = schedule.day_plan(db, dc, today)
         session_status = sessions.get(dc.id)
+        live = {"session_status": session_status, "with_doctor": with_doctor.get(dc.id)}
         if session_status in ("IN_OPD", "ON_BREAK"):
             # The doctor is actually running OPD (even past the set hours): open now.
-            status = SlotStatus("OPEN_NOW", None, waiting.get(dc.id, 0))
+            status = SlotStatus("OPEN_NOW", None, waiting.get(dc.id, 0), **live)
         elif not plan.open or session_status == "CLOSED" or now.time() >= plan.end:
-            status = SlotStatus("CLOSED_TODAY", None, waiting.get(dc.id, 0))
+            status = SlotStatus("CLOSED_TODAY", None, waiting.get(dc.id, 0), **live)
         elif now.time() < plan.start:
-            status = SlotStatus("OPENS_LATER", schedule.hhmm(plan.start), waiting.get(dc.id, 0))
+            status = SlotStatus("OPENS_LATER", schedule.hhmm(plan.start), waiting.get(dc.id, 0), **live)
         else:
-            status = SlotStatus("OPEN_NOW", None, waiting.get(dc.id, 0))
+            status = SlotStatus("OPEN_NOW", None, waiting.get(dc.id, 0), **live)
         _cache[dc.id] = (now_mono + STATUS_TTL_SECONDS, status)
         result[dc.id] = status
     return result
@@ -189,6 +205,9 @@ def doctor_card(dc: DoctorClinic, status: SlotStatus | None = None) -> dict:
         card["waitingToday"] = status.waiting if status.status == "OPEN_NOW" else None
         card["opensAt"] = status.opens_at
         card["opdStatus"] = status.status
+        # Live: today's OPD and the token with the doctor (updates come on "live:<doctorClinicId>").
+        card["sessionStatus"] = status.session_status
+        card["withDoctor"] = status.with_doctor
     return card
 
 
@@ -235,7 +254,7 @@ def clinic_card(c: Clinic, slots: list[DoctorClinic], statuses: dict, origin) ->
         "departmentKeys": keys,
         "summary": summary(len(doctors), keys),
         **clinic_status([statuses[dc.id] for dc in slots]),
-        "doctors": [doctor_card(dc) for dc in doctors[:5]],
+        "doctors": [doctor_card(dc, statuses.get(dc.id)) for dc in doctors[:5]],
     }
 
 

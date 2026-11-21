@@ -12,6 +12,10 @@ A patient's tracking page connects without a cookie, sending {bookingId, code} (
 link) as the Socket.IO auth. It joins only "booking:<id>" and "session:<sessionId>" for that
 booking, which carry token numbers and the queue's status, never other patients' details.
 
+Anyone browsing clinics can connect with {watch: [doctorClinicId, ...]} (no sign-in) to join
+"live:<doctorClinicId>" rooms: "live.updated" with today's OPD status, the token with the doctor
+and how many are waiting. Nothing about any patient.
+
 Routes call events.emit() from worker threads (they are sync functions), so emits are handed to
 the server's event loop. Rooms live in this process's memory: run a single worker, or add a
 Socket.IO message queue (e.g. Redis) before running several.
@@ -126,8 +130,29 @@ def _patient_rooms(auth: object) -> list[str] | None:
         return [f"booking:{booking.id}", f"session:{booking.session_id}"]
 
 
+MAX_WATCHED = 60
+
+
+def _watch_rooms(auth: dict) -> list[str] | None:
+    """Patients browsing clinics: the public live rooms of the doctor-clinic slots on screen."""
+    ids = auth.get("watch")
+    if not isinstance(ids, list) or len(ids) > MAX_WATCHED:
+        return None
+    try:
+        return [f"live:{uuid.UUID(str(i))}" for i in ids]
+    except ValueError:
+        return None
+
+
 @sio.event
 async def connect(sid, environ, auth=None):
+    if isinstance(auth, dict) and "watch" in auth:
+        rooms = _watch_rooms(auth)
+        if rooms is None:
+            raise socketio.exceptions.ConnectionRefusedError("Send up to 60 clinic ids to watch.")
+        for room in rooms:
+            await sio.enter_room(sid, room)
+        return
     if isinstance(auth, dict) and "bookingId" in auth:
         rooms = await asyncio.to_thread(_patient_rooms, auth)
         if rooms is None:
@@ -169,7 +194,7 @@ def _forward(room: str, event: str, payload: dict) -> None:
     # Doctor events also go to the clinic's room, where staff listen. session/booking rooms are
     # for patients' tracking pages.
     loop = _loop  # read once: shutdown may clear it from another thread
-    if loop is None or loop.is_closed() or not room.startswith(("doctor:", "session:", "booking:")):
+    if loop is None or loop.is_closed() or not room.startswith(("doctor:", "session:", "booking:", "live:")):
         return
     rooms = [room]
     if room.startswith("doctor:") and payload.get("doctorClinicId"):

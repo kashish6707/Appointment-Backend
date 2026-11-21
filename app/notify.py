@@ -2,6 +2,9 @@
 
 import uuid
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import object_session
+
 from app import events
 from app.models import Booking, OpdSession
 from app.serializers import booking_item, session_json
@@ -27,6 +30,36 @@ def queue_changed(session: OpdSession, doctor_id: uuid.UUID) -> None:
             "id": str(session.id),
             "status": session.status,
             "nowServing": session.current_token,
+            "breakUntil": session.break_until.isoformat() if session.break_until else None,
+        },
+    )
+    live_changed(session)
+
+
+def live_changed(session: OpdSession) -> None:
+    """Today's public queue status for patients browsing clinics (no patient details): OPD
+    status, the token with the doctor, and how many are waiting."""
+    from app import directory  # avoid an import cycle
+    from app.timeutil import today_ist
+
+    directory.forget(session.doctor_clinic_id)
+    db = object_session(session)
+    if db is None or session.date != today_ist():
+        return
+    with_doctor, waiting = db.execute(
+        select(
+            func.min(Booking.token).filter(Booking.status == "WITH_DOCTOR"),
+            func.count(Booking.id).filter(Booking.status == "WAITING"),
+        ).where(Booking.session_id == session.id)
+    ).one()
+    events.emit(
+        f"live:{session.doctor_clinic_id}",
+        "live.updated",
+        {
+            "doctorClinicId": str(session.doctor_clinic_id),
+            "sessionStatus": session.status,
+            "withDoctor": with_doctor,
+            "waiting": waiting,
             "breakUntil": session.break_until.isoformat() if session.break_until else None,
         },
     )

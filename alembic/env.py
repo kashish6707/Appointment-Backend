@@ -1,7 +1,10 @@
+import sys
+import time
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings
 from app.models import Base
@@ -20,9 +23,23 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _connect(engine, attempts: int = 5):
+    """Connect, retrying a few times: on deploy the database may be waking up, or the network
+    slow to come up. Each try gives up after 15 seconds, so a deploy never hangs silently."""
+    for attempt in range(1, attempts + 1):
+        print(f"Migrations: connecting to the database (try {attempt} of {attempts})", file=sys.stderr, flush=True)
+        try:
+            return engine.connect()
+        except OperationalError as e:
+            if attempt == attempts:
+                raise
+            print(f"Migrations: couldn't connect ({str(e).splitlines()[0]}); trying again in 5 seconds", file=sys.stderr, flush=True)
+            time.sleep(5)
+
+
 def run_migrations_online() -> None:
-    engine = create_engine(url)
-    with engine.connect() as connection:
+    engine = create_engine(url, connect_args={"connect_timeout": 15})
+    with _connect(engine) as connection:
         context.configure(connection=connection, target_metadata=Base.metadata)
         with context.begin_transaction():
             context.run_migrations()

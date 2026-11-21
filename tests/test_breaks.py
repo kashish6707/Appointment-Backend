@@ -47,7 +47,8 @@ def test_expected_times_move_by_the_break(client, opd, db):
     act(client, opd, "start")
     act(client, opd, "next")  # token 1 with the doctor; tokens 2 and 3 waiting
     before = status_of(client, opd["bookings"][2])
-    assert before["patientsAhead"] == 1 and before["estimatedMinutes"] == 10  # usual 10 minutes each
+    # Usual 10 minutes each: what's left of token 1's time, then token 2's.
+    assert before["patientsAhead"] == 1 and before["estimatedMinutes"] == 20
 
     pause(client, opd, minutes=30)
     during = status_of(client, opd["bookings"][2])

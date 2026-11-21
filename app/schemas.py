@@ -2,7 +2,7 @@
 
 import re
 import uuid
-from datetime import date
+from datetime import date, time
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
@@ -257,11 +257,31 @@ class BookingIn(_Body):
     # Token updates on WhatsApp at the patient's number, and the language to send them in.
     whatsapp: StrictBool = True
     lang: Literal["en", "hi"] = "en"
+    # The hour chosen (its start, "10:00"), when the clinic limits tokens per hour.
+    slot_start: time | None = Field(None, alias="slotStart")
 
 
 class CancelIn(_Body):
     code: str = Field(min_length=1, max_length=100)
     reason: Reason = None
+
+
+class RescheduleIn(_Body):
+    code: str = Field(min_length=1, max_length=100)
+    date: date
+    slot_start: time | None = Field(None, alias="slotStart")
+
+
+class TokensPerHourIn(_Body):
+    tokens_per_hour: int | None = Field(None, alias="tokensPerHour", ge=1, le=60)
+
+
+class MinutesPerPatientIn(_Body):
+    minutes_per_patient: int | None = Field(None, alias="minutesPerPatient", ge=1, le=120)
+
+
+class ConsultMinutesIn(_Body):
+    minutes: int | None = Field(None, ge=1, le=240)  # null: the clinic's usual time
 
 
 class PaymentConfirmIn(_Body):
@@ -609,7 +629,7 @@ class ProfileIn(_Body):
     designation: Annotated[str | None, BeforeValidator(_text(120, "designation", 2))] = None
     name_hi: Annotated[str | None, BeforeValidator(_text(100, "nameHi", 2))] = Field(None, alias="nameHi")
     # Show my photo and registration number to patients. Left out when editing: unchanged.
-    photo_consent: StrictBool | None = Field(None, alias="photoConsent")
+    photo_consent: StrictBool | None = Field(None, alias="photoConsent")  # show the registration number
     achievements: Annotated[list[str], BeforeValidator(_text_list(20, 200, "achievements"))] = []
     expertise: Annotated[list[str], BeforeValidator(_text_list(20, 60, "expertise"))] = []
 

@@ -15,7 +15,7 @@ from app.deps import Db
 from app.models import Booking, Clinic, Doctor, DoctorClinic, OpdSession, Patient, PatientAccount, Payment
 from app.routers.patient import _age_from as bookings_age, optional_account
 from app.payments import get_gateway
-from app.schemas import BookingIn, CancelIn, PaymentConfirmIn
+from app.schemas import BookingIn, CancelIn, PaymentConfirmIn, RescheduleIn
 from app.serializers import clinic_slot
 from app.timeutil import now_ist, today_ist
 
@@ -174,7 +174,9 @@ def create_booking(
             weight_kg=body.patient.weight_kg,
             records_consent=body.records_consent,
         )
-    booking, code = bookings.add_booking(db, session, patient, visit_type=body.visit_type, source="ONLINE")
+    booking, code = bookings.add_booking(
+        db, session, patient, visit_type=body.visit_type, source="ONLINE", slot_start=body.slot_start, choose_hour=True
+    )
     booking.whatsapp_opt_in = body.whatsapp
     booking.lang = body.lang
     notifications.queue_booked(db, booking, code, patient.name)
@@ -293,6 +295,46 @@ def cancel_booking(booking_id: uuid.UUID, body: CancelIn, db: Db, background: Ba
     return {"bookingId": str(booking.id), "status": booking.status, "refund": refund}
 
 
+@router.post("/bookings/{booking_id}/reschedule", status_code=201)
+def reschedule_booking(booking_id: uuid.UUID, body: RescheduleIn, db: Db, background: BackgroundTasks):
+    """Move a waiting token to another day: a new token on that day, and this one cancelled.
+
+    Both happen in one transaction, so the patient never ends up with neither (or both).
+    """
+    if db.get(Booking, booking_id) is None:
+        raise HTTPException(404, bookings.BOOKING_NOT_FOUND)
+    booking = bookings.get_booking_by_code(db, booking_id, body.code, lock=True)
+    if booking.status != "WAITING":
+        raise HTTPException(409, "This token can't be moved now.")
+    old_session = booking.session
+    dc = old_session.doctor_clinic
+    if dc.token_amount > 0:
+        raise HTTPException(409, "Tokens paid online can't be moved. Cancel this token and book again.")
+    if body.date == old_session.date:
+        raise HTTPException(400, "Your token is already for this day. Choose another day.")
+    bookings.check_bookable_date(db, dc, body.date, now_ist())
+
+    session = bookings.lock_session(db, dc.id, body.date)
+    new, code = bookings.add_booking(
+        db, session, booking.patient, visit_type=booking.visit_type, source="ONLINE", slot_start=body.slot_start, choose_hour=True
+    )
+    new.whatsapp_opt_in = booking.whatsapp_opt_in
+    new.lang = booking.lang
+
+    booking.status = "CANCELLED"
+    booking.cancelled_at = now_ist()
+    booking.cancelled_by = "PATIENT"
+    booking.cancel_reason = f"Moved to {body.date.isoformat()}"
+    notifications.queue_booked(db, new, code, booking.patient.name)
+    notifications.queue_progress(db, old_session)  # the patients after them moved up
+    notifications.queue_progress(db, session)
+    db.commit()
+    background.add_task(notifications.deliver_due)
+    notify.booking_and_queue(booking, dc.doctor_id, "booking.cancelled")
+    notify.booking_and_queue(new, dc.doctor_id, "booking.created")
+    return {"bookingId": str(new.id), "token": new.token, "trackingCode": code, "date": body.date.isoformat()}
+
+
 @router.get("/clinics/{doctor_clinic_id}/availability")
 def availability(doctor_clinic_id: uuid.UUID, db: Db):
     """The days patients can book at this doctor's clinic, today and the next days.
@@ -306,6 +348,7 @@ def availability(doctor_clinic_id: uuid.UUID, db: Db):
     last = today + timedelta(days=bookings.MAX_DAYS_AHEAD)
     plans = schedule.plans(db, dc, today, last)
     booked = schedule.booked_by_date(db, dc, today, last)
+    by_hour = schedule.booked_by_hour(db, dc, today, last)
     closed_sessions = set(
         db.scalars(
             select(OpdSession.date).where(
@@ -325,7 +368,19 @@ def availability(doctor_clinic_id: uuid.UUID, db: Db):
             reason = "FULL"
         else:
             reason = None
-        days.append({**plan.json(), "booked": n, "left": left, "bookable": reason is None, "reason": reason})
+        # Tokens per hour: the hours patients can pick, each with its places left.
+        hours = []
+        for h in schedule.hour_slots(plan, dc.tokens_per_hour):
+            h_left = max(h.capacity - by_hour.get((day, h.start), 0), 0)
+            over = day == today and now.time() >= h.end
+            hours.append({"start": schedule.hhmm(h.start), "end": schedule.hhmm(h.end), "capacity": h.capacity, "left": h_left,
+                          "bookable": reason is None and not over and h_left > 0, "over": over})
+        if hours and reason is None and not any(h["bookable"] for h in hours):
+            reason = "FULL" if any(not h["over"] for h in hours) else "HOURS_OVER"
+        if hours:
+            open_left = sum(h["left"] for h in hours if not h["over"])
+            left = open_left if left is None else min(left, open_left)
+        days.append({**plan.json(), "booked": n, "left": left, "bookable": reason is None, "reason": reason, "hours": hours})
     doctor = dc.doctor
     return {
         "doctorClinicId": str(dc.id),
@@ -336,5 +391,6 @@ def availability(doctor_clinic_id: uuid.UUID, db: Db):
                    "area": dc.clinic.area, "address": dc.clinic.address},
         "fee": dc.fee,
         "tokenAmount": dc.token_amount,
+        "tokensPerHour": dc.tokens_per_hour,
         "days": days,
     }

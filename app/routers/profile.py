@@ -58,10 +58,8 @@ def own_photo(actor: Root):
 
 @router.get("/api/public/doctors/{doctor_id}/photo")
 def public_photo(doctor_id: uuid.UUID, db: Db):
-    """Public only for verified doctors who agreed to show their photo."""
-    doctor = db.scalar(
-        select(Doctor).where(Doctor.id == doctor_id, Doctor.is_verified.is_(True), Doctor.photo_consent_at.is_not(None))
-    )
+    """Public for verified doctors (unverified accounts aren't shown to patients at all)."""
+    doctor = db.scalar(select(Doctor).where(Doctor.id == doctor_id, Doctor.is_verified.is_(True)))
     if doctor is None:
         raise HTTPException(404, PHOTO_NOT_FOUND)
     # The URL carries ?v=<photo id>, so it can be cached for a long time.

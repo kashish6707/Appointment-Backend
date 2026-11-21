@@ -26,13 +26,14 @@ if not log.handlers:
 
 
 async def _retry_messages_forever(every_seconds: int = 60) -> None:
-    """Send messages left over: provider failures waiting to retry, or a crash before sending."""
+    """Every minute: time-based queue messages while an OPD runs, and messages left over
+    (provider failures waiting to retry, or a crash before sending). See notifications.tick."""
     while True:
         await asyncio.sleep(every_seconds)
         try:
-            await asyncio.to_thread(notifications.deliver_due)
+            await asyncio.to_thread(notifications.tick)
         except Exception:
-            log.exception("Retrying messages failed")
+            log.exception("The every-minute message check failed")
 
 
 @asynccontextmanager

@@ -146,10 +146,10 @@ def test_public_profile_only_for_verified_doctors(client, db):
     with db.begin():
         db.execute(text("UPDATE doctors SET is_verified = true"))
 
-    # Verified, but no consent yet: initials instead of the photo, no registration number.
+    # Verified: the photo is shown; the registration number only once they choose to show it.
     data = client.get(f"/api/public/doctors/{doctor_id}").json()
-    assert data["photoUrl"] is None and data["registrationNo"] is None
-    assert client.get(f"/api/public/doctors/{doctor_id}/photo").status_code == 404
+    assert data["photoUrl"].startswith(f"/api/public/doctors/{doctor_id}/photo?v=") and data["registrationNo"] is None
+    assert client.get(data["photoUrl"]).status_code == 200
     assert data["experienceYears"] == 12 and data["fee"] == 500
     assert [d["name"] for d in data["degrees"]] == ["MBBS", "MS (Orthopaedics)"]
     assert "phone" not in data

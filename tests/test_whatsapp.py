@@ -47,7 +47,7 @@ def clinic(client, make_slot, db):
 def test_booking_sends_the_token_with_a_live_link(clinic):
     [(phone, body)] = sent("BOOKED")[:1]
     assert phone == PHONES[0]
-    assert "your token number is 1 for Dr Test" in body and "Test Clinic" in body and "OPD starts around 12 am" in body
+    assert "your token number is 1 for Dr Test" in body and "Test Clinic" in body and "Please come by 12 am" in body
     link = body.split("live: ")[1].split(" ")[0]
     assert link.startswith("http://localhost:3000/track/")
     assert len(sent("BOOKED")) == 4
@@ -57,19 +57,19 @@ def test_the_queue_moving_tells_the_right_patients(clinic):
     do = clinic["do"]
     do("start")
     assert [p for p, _ in sent("OPD_STARTED")] == PHONES[:4]
-    # Tokens 1-3 were told how many are before them in "OPD started": no extra "get ready" yet.
+    # 10 minutes each: tokens 2 and 3 are within 20 minutes, so "OPD started" covers them too.
     assert sent("NEXT") == [] and sent("GET_READY") == []
 
     do("next")  # token 1 goes in
     assert sent("YOUR_TURN") == [(PHONES[0], "Clinically: It's your turn. Token 1, please go in to see Dr Test 1 now. Thank you")]
     assert [p for p, _ in sent("NEXT")] == [PHONES[1]]  # token 2 is next
-    [(phone, body)] = sent("GET_READY")  # token 4 now has 2 before them
-    assert phone == PHONES[3] and "only 2 patients are before your token 4" in body
+    assert sent("GET_READY") == []  # token 4 is still 30 minutes away
 
-    do("next")  # token 2 goes in; token 3 is next; nobody new is told twice
+    do("next")  # token 2 goes in fast: 3 minutes each now (the least), so token 4 is close
     assert [p for p, _ in sent("YOUR_TURN")] == PHONES[:2]
     assert [p for p, _ in sent("NEXT")] == PHONES[1:3]
-    assert len(sent("GET_READY")) == 1
+    [(phone, body)] = sent("GET_READY")
+    assert phone == PHONES[3] and "your turn for token 4 with Dr Test" in body and "is in about 6 minutes" in body
 
 
 def test_breaks_and_closing(clinic):

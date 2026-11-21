@@ -35,6 +35,8 @@ def booking_item(b: Booking) -> dict:
         "sessionId": str(b.session_id),
         "doctorClinicId": str(b.session.doctor_clinic_id),
         "token": b.token,
+        "slotStart": b.slot_start.strftime("%H:%M") if b.slot_start else None,
+        "consultMinutes": b.consult_minutes,
         "status": b.status,
         "visitType": b.visit_type,
         "source": b.source,

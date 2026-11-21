@@ -17,6 +17,7 @@ it's recorded as SKIPPED. Each booking gets each message once (unique booking + 
 """
 
 import logging
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -38,8 +39,17 @@ log = logging.getLogger("clinically")
 
 MAX_ATTEMPTS = 5
 BATCH = 50
-GET_READY_AT = 2  # "get ready" once this many (or fewer) patients are before you
+GET_READY_MINUTES = 20  # "get ready" when a patient's turn is about this many minutes away
+LATE_MINUTES = 15  # "running late" when the expected time moves later by at least this much
+LATE_GAP = timedelta(minutes=30)  # and at most one such message per patient in this time
 COVERED = "Covered by the OPD started message"
+
+# What the every-minute tick (app/main.py) has to look at. It only touches the database while one
+# is set, so a free database that sleeps when idle (Neon) can sleep outside OPD hours.
+_opd_running = threading.Event()  # an OPD may be running: expected times move as time passes
+_messages_waiting = threading.Event()  # messages may be waiting to be sent or retried
+_opd_running.set()  # after a restart, look once
+_messages_waiting.set()
 
 
 @dataclass(frozen=True)
@@ -53,8 +63,8 @@ class Kind:
 KINDS = {
     "BOOKED": Kind(
         "clinically_token_booked",
-        "Hello {1}, your token number is {2} for {3} at {4} on {5}. OPD starts around {6}. Follow the queue live: {7} . Clinically",
-        "नमस्ते {1}, {4} में {3} के लिए {5} को आपका टोकन नंबर {2} है। ओपीडी लगभग {6} पर शुरू होगी। लाइन लाइव देखें: {7} . Clinically",
+        "Hello {1}, your token number is {2} for {3} at {4} on {5}. Please come by {6}. Follow the queue live: {7} . Clinically",
+        "नमस्ते {1}, {4} में {3} के लिए {5} को आपका टोकन नंबर {2} है। कृपया {6} तक आ जाएँ। लाइन लाइव देखें: {7} . Clinically",
     ),
     "OPD_STARTED": Kind(
         "clinically_opd_started",
@@ -68,8 +78,13 @@ KINDS = {
     ),
     "GET_READY": Kind(
         "clinically_get_ready",
-        "Clinically: Get ready, only {1} patients are before your token {2} for {3} at {4}. Please start coming to the clinic. Live queue: {5} . Thank you",
-        "Clinically: तैयार हो जाइए, {4} में {3} के लिए आपके टोकन {2} से पहले सिर्फ़ {1} मरीज़ हैं। कृपया क्लिनिक आना शुरू करें। लाइव लाइन: {5} . धन्यवाद",
+        "Clinically: Get ready, your turn for token {1} with {2} at {3} is in about {4} minutes (around {5}). Please reach the clinic. Live queue: {6} . Thank you",
+        "Clinically: तैयार हो जाइए, {3} में {2} के पास टोकन {1} की आपकी बारी लगभग {4} मिनट में ({5} के आसपास) है। कृपया क्लिनिक पहुँचें। लाइव लाइन: {6} . धन्यवाद",
+    ),
+    "RUNNING_LATE": Kind(
+        "clinically_running_late",
+        "Clinically: {1} is running late. The new expected time for your token {2} is around {3}. Live queue: {4} . Sorry for the wait",
+        "Clinically: {1} को देर हो रही है। आपके टोकन {2} का नया अनुमानित समय लगभग {3} है। लाइव लाइन: {4} . इंतज़ार के लिए क्षमा करें",
     ),
     "NEXT": Kind(
         "clinically_you_are_next",
@@ -152,6 +167,8 @@ def _insert(db: DbSession, rows: list[dict]) -> int:
         .on_conflict_do_nothing(constraint="notifications_booking_dedupe")
         .returning(Notification.id)
     ).all()
+    if inserted:
+        _messages_waiting.set()
     return len(inserted)
 
 
@@ -194,56 +211,87 @@ def queue_booked(db: DbSession, booking: Booking, code: str | None, patient_name
     session = booking.session
     dc = _slot(db, session)
     plan = schedule.day_plan(db, dc, session.date)
-    starts = _clock(plan.start or dc.opd_start)
+    # The hour they chose (tokens per hour), else when OPD starts.
+    starts = _clock(booking.slot_start or plan.start or dc.opd_start)
     params = [patient_name, booking.token, dc.doctor.full_name, dc.clinic.name, _day(session.date), starts, _link(db, booking, code)]
     return _insert(db, [_row(booking, session.id, "BOOKED", params)])
 
 
-def _progress_params(db: DbSession, dc: DoctorClinic, b: Booking, ahead: int) -> list:
-    if ahead == 0:
-        return [b.token, dc.doctor.full_name, dc.clinic.name]
-    return [ahead, b.token, dc.doctor.full_name, dc.clinic.name, _link(db, b)]
+def _at(at: datetime) -> str:
+    """An expected time for a message: India time, rounded down to 5 minutes ("11:40 am")."""
+    at = at.astimezone(IST)
+    return _clock(at - timedelta(minutes=at.minute % 5))
+
+
+def _turns(db: DbSession, session: OpdSession) -> list:
+    from app import bookings  # avoid an import cycle
+
+    return bookings.turn_times(db, session)
 
 
 def queue_opd_started(db: DbSession, session: OpdSession) -> int:
     """"OPD has started" for every waiting patient. Returns how many were queued.
 
-    Patients already within GET_READY_AT of the front are told that here, so they don't also
-    get "get ready" / "you're next" straight after (recorded as SKIPPED). Safe to call twice.
+    The patient at the front, and anyone whose turn is already within GET_READY_MINUTES, is told
+    that here: they don't also get "you're next" / "get ready" straight after (recorded as
+    SKIPPED). Safe to call twice. Each patient's expected time now is remembered, so a later
+    big delay can be told.
     """
     dc = _slot(db, session)
     done = _already(db, session)
     rows = []
-    for ahead, b in enumerate(_waiting(db, session)):
+    for ahead, (b, minutes, at) in enumerate(_turns(db, session)):
+        b.expected_told_at = at
         if (b.id, OPD_STARTED) in done:
             continue
         rows.append(_row(b, session.id, OPD_STARTED, [dc.doctor.full_name, dc.clinic.name, b.token, ahead, _link(db, b)]))
-        if ahead <= GET_READY_AT:
+        if ahead == 0 or minutes <= GET_READY_MINUTES:
             kind = "NEXT" if ahead == 0 else "GET_READY"
-            covered = _row(b, session.id, kind, [b.token] if ahead == 0 else [ahead, b.token])
+            covered = _row(b, session.id, kind, [b.token])
             rows.append({**covered, "params": [], "body": COVERED, "status": "SKIPPED", "last_error": COVERED})
     _insert(db, rows)
+    _opd_running.set()
     return sum(1 for r in rows if r["kind"] == OPD_STARTED)
 
 
-def queue_progress(db: DbSession, session: OpdSession) -> int:
-    """After the queue moved: "get ready" (2 or fewer before you), "you're next", and
-    "it's your turn" for whoever was just called in. Each booking gets each one once."""
+def queue_progress(db: DbSession, session: OpdSession, now: datetime | None = None) -> int:
+    """After the queue moved, or time passed while OPD runs. Each patient gets, once each:
+
+    - "you're next" at the front of the queue,
+    - "get ready" when their turn is about GET_READY_MINUTES away,
+    - "it's your turn" when called in,
+    - "running late" when their expected time has moved LATE_MINUTES later than they were told
+      (at most once per LATE_GAP). Earlier is never sent: "get ready" covers it.
+    """
     if session.status != "IN_OPD":
         return 0
+    from app.timeutil import now_ist
+
+    now = now or now_ist()
     dc = _slot(db, session)
     done = _already(db, session)
     rows = []
-    for ahead, b in enumerate(_waiting(db, session)[: GET_READY_AT + 1]):
-        kind = "NEXT" if ahead == 0 else "GET_READY"
-        if (b.id, kind) not in done:  # don't make a tracking link for a message that exists
-            rows.append(_row(b, session.id, kind, _progress_params(db, dc, b, ahead)))
+    for ahead, (b, minutes, at) in enumerate(_turns(db, session)):
+        if ahead == 0:
+            if (b.id, "NEXT") not in done:
+                rows.append(_row(b, session.id, "NEXT", [b.token, dc.doctor.full_name, dc.clinic.name]))
+        elif minutes <= GET_READY_MINUTES:
+            if (b.id, "GET_READY") not in done:
+                rows.append(_row(b, session.id, "GET_READY", [b.token, dc.doctor.full_name, dc.clinic.name, max(minutes, 2), _at(at), _link(db, b)]))
+                b.expected_told_at = at
+        elif b.expected_told_at is None:
+            b.expected_told_at = at  # booked after OPD started: nothing told yet beyond "come by"
+        elif at - b.expected_told_at >= timedelta(minutes=LATE_MINUTES) and (b.delay_told_at is None or now - b.delay_told_at >= LATE_GAP):
+            key = f"LATE:{now.astimezone(timezone.utc):%Y%m%d%H%M%S%f}"
+            rows.append(_row(b, session.id, "RUNNING_LATE", [dc.doctor.full_name, b.token, _at(at), _link(db, b)], key))
+            b.expected_told_at, b.delay_told_at = at, now
     called = db.scalars(
         select(Booking).options(joinedload(Booking.patient)).where(Booking.session_id == session.id, Booking.status == "WITH_DOCTOR")
     ).all()
     for b in called:
         if (b.id, "YOUR_TURN") not in done:
             rows.append(_row(b, session.id, "YOUR_TURN", [b.token, dc.doctor.full_name]))
+    _opd_running.set()
     return _insert(db, rows)
 
 
@@ -259,6 +307,9 @@ def queue_break(db: DbSession, session: OpdSession) -> int:
         _row(b, session.id, "BREAK", [dc.doctor.full_name, minutes, back, b.token, _link(db, b)], key)
         for b in _waiting(db, session)
     ]
+    # The break message tells them it'll be later: that's the time they now expect.
+    for b, _, at in _turns(db, session):
+        b.expected_told_at = at
     return _insert(db, rows)
 
 
@@ -276,6 +327,33 @@ def queue_cancelled(db: DbSession, bookings: list[Booking]) -> int:
         dc = _slot(db, b.session)
         rows.append(_row(b, b.session_id, "CANCELLED", [b.token, dc.doctor.full_name, _day(b.session.date)]))
     return _insert(db, rows)
+
+
+# --- every minute -----------------------------------------------------------------------
+
+
+def tick() -> None:
+    """Run every minute by the app: while an OPD runs, send "get ready" / "running late" as time
+    passes (not only when the queue moves); and send or retry messages left over."""
+    from app.timeutil import today_ist
+
+    if _opd_running.is_set():
+        with SessionLocal() as db:
+            sessions = db.scalars(
+                select(OpdSession)
+                .where(OpdSession.date == today_ist(), OpdSession.status.in_(("IN_OPD", "ON_BREAK")))
+                .with_for_update(skip_locked=True)  # a doctor's request holds it: they'll do it
+            ).all()
+            if not sessions:
+                _opd_running.clear()
+            for session in sessions:
+                queue_progress(db, session)
+            db.commit()
+    if _messages_waiting.is_set():
+        deliver_due()
+        with SessionLocal() as db:
+            if not db.scalar(select(func.count()).select_from(Notification).where(Notification.status == "PENDING")):
+                _messages_waiting.clear()
 
 
 # --- sending ----------------------------------------------------------------------------

@@ -17,6 +17,7 @@ from sqlalchemy import (
     Time,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -85,6 +86,8 @@ class Doctor(Base):
     name_hi: Mapped[str | None] = mapped_column(Text)
     department_key: Mapped[str | None] = mapped_column(Text)  # app/departments.py, from `department`
     # Photo and registration number are shown to patients only after the doctor agreed.
+    # When the doctor chose to show their registration number to patients (the name is from when
+    # it also covered the photo; photos are now always shown). None: hidden.
     photo_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Public profile, filled in at registration (older accounts complete it on the profile page).
     photo_key: Mapped[str | None] = mapped_column(Text)  # file under MEDIA_DIR
@@ -285,6 +288,8 @@ class DoctorClinic(Base):
         CheckConstraint("fee >= 0", name="doctor_clinics_fee_nonnegative"),
         CheckConstraint("token_amount BETWEEN 0 AND fee", name="doctor_clinics_token_amount"),
         CheckConstraint("opd_start < opd_end", name="doctor_clinics_opd_hours"),
+        CheckConstraint("tokens_per_hour IS NULL OR tokens_per_hour BETWEEN 1 AND 60", name="doctor_clinics_tokens_per_hour"),
+        CheckConstraint("minutes_per_patient IS NULL OR minutes_per_patient BETWEEN 1 AND 120", name="doctor_clinics_minutes_per_patient"),
         CheckConstraint(
             "opd_days <@ ARRAY['MON','TUE','WED','THU','FRI','SAT','SUN']::text[]",
             name="doctor_clinics_opd_days",
@@ -300,6 +305,10 @@ class DoctorClinic(Base):
     opd_days: Mapped[list[str]] = mapped_column(ARRAY(Text))  # e.g. ["MON", ..., "SAT"]
     opd_start: Mapped[time] = mapped_column(Time)  # Asia/Kolkata wall-clock time
     opd_end: Mapped[time] = mapped_column(Time)
+    # Most tokens in each hour of OPD; patients then pick the hour. None = no hourly limit.
+    tokens_per_hour: Mapped[int | None] = mapped_column(Integer)
+    # How long the doctor usually takes per patient, for expected times. None: measured that day.
+    minutes_per_patient: Mapped[int | None] = mapped_column(Integer)
 
     doctor: Mapped[Doctor] = relationship(back_populates="clinics")
     clinic: Mapped[Clinic] = relationship()
@@ -502,7 +511,8 @@ class PatientCorrection(Base):
 class Booking(Base):
     __tablename__ = "bookings"
     __table_args__ = (
-        UniqueConstraint("session_id", "token", name="bookings_session_token"),
+        # A cancelled token's number can be given out again (tokens per hour, migration 0016).
+        Index("bookings_session_token", "session_id", "token", unique=True, postgresql_where=text("status <> 'CANCELLED'")),
         one_of("visit_type", VISIT_TYPES, "bookings_visit_type"),
         one_of("source", BOOKING_SOURCES, "bookings_source"),
         one_of("status", BOOKING_STATUSES, "bookings_status"),
@@ -510,14 +520,22 @@ class Booking(Base):
             "cancelled_by IS NULL OR cancelled_by IN ('PATIENT', 'CLINIC')", name="bookings_cancelled_by"
         ),
         CheckConstraint("token > 0", name="bookings_token_positive"),
+        CheckConstraint("consult_minutes IS NULL OR consult_minutes BETWEEN 1 AND 240", name="bookings_consult_minutes"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    # No separate index: the (session_id, token) unique constraint covers it.
+    # No separate index: the (session_id, token) unique index covers it.
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("opd_sessions.id", ondelete="CASCADE")
     )
     token: Mapped[int] = mapped_column(Integer)
+    # The hour the patient chose (its start), when the clinic limits tokens per hour.
+    slot_start: Mapped[time | None] = mapped_column(Time)
+    # Time this patient will need with the doctor, when set (else the clinic's usual time).
+    consult_minutes: Mapped[int | None] = mapped_column(Integer)
+    # The expected time the patient was last told, and when a "running late" message last went.
+    expected_told_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delay_told_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     patient_id: Mapped[uuid.UUID] = fk("patients.id")
     visit_type: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text)

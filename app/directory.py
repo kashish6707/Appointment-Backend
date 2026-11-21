@@ -1,7 +1,7 @@
 """The public directory: clinics and hospitals, their doctors, opening status and distance.
 
 Only clinics with at least one verified doctor are listed, and only verified doctors are shown.
-A doctor's photo and registration number are only shown if they agreed (photo_consent_at).
+A doctor's registration number is only shown if they chose to show it (photo_consent_at).
 """
 
 import base64

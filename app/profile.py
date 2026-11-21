@@ -91,11 +91,11 @@ def _photo_url(doctor: Doctor, base: str) -> str | None:
 
 
 def public_json(doctor: Doctor) -> dict:
-    """What patients see. The photo and registration number only if the doctor agreed to show
-    them (otherwise patients see initials); contact details never."""
+    """What patients see: the photo always; the registration number only if the doctor chose to
+    show it (photo_consent_at); contact details never."""
     consent = doctor.photo_consent_at is not None
     return {
-        "photoUrl": _photo_url(doctor, f"/api/public/doctors/{doctor.id}/photo") if consent else None,
+        "photoUrl": _photo_url(doctor, f"/api/public/doctors/{doctor.id}/photo"),
         "registrationNo": doctor.registration_no if consent else None,
         "nameHi": doctor.name_hi,
         "designation": doctor.designation,

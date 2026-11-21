@@ -13,12 +13,12 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.orm import joinedload
 
-from app import booking_payments, notifications, notify, schedule
+from app import booking_payments, directory, notifications, notify, schedule
 from app.access import Actor, CanManageSchedule, audit
 from app.bookings import MAX_DAYS_AHEAD
 from app.deps import Db
 from app.models import Booking, DateException, DoctorClinic, OpdSession, Payment, WeeklyHours
-from app.schemas import DateExceptionIn, WeeklyHoursIn
+from app.schemas import DateExceptionIn, MinutesPerPatientIn, TokensPerHourIn, WeeklyHoursIn
 from app.serializers import clinic_slot
 from app.timeutil import now_ist, today_ist
 
@@ -74,6 +74,8 @@ def _schedule_json(db: Db, dc: DoctorClinic) -> dict:
         "exceptions": [_exception_json(e) for e in exceptions],
         # What patients can book right now, so the doctor sees the effect of their changes.
         "upcoming": [{**p.json(), "booked": booked.get(d, 0)} for d, p in plans.items()],
+        "tokensPerHour": dc.tokens_per_hour,
+        "minutesPerPatient": dc.minutes_per_patient,
         "bookingWindowDays": MAX_DAYS_AHEAD,
     }
 
@@ -151,6 +153,41 @@ def set_weekly(doctor_clinic_id: uuid.UUID, body: WeeklyHoursIn, actor: CanManag
         db, actor, dc, body.confirm_cancel, "schedule.weekly",
         days={d.weekday: (f"{schedule.hhmm(d.start)}-{schedule.hhmm(d.end)}" + (f" x{d.limit}" if d.limit else "")) for d in open_days},
     )
+
+
+@router.put("/clinics/{doctor_clinic_id}/tokens-per-hour")
+def set_tokens_per_hour(doctor_clinic_id: uuid.UUID, body: TokensPerHourIn, actor: CanManageSchedule, db: Db):
+    """Most tokens patients can book in each hour of OPD (null: no hourly limit).
+
+    Tokens already booked keep their numbers; new bookings follow the new limit.
+    """
+    dc = _slot(db, actor, doctor_clinic_id)
+    old = dc.tokens_per_hour
+    dc.tokens_per_hour = body.tokens_per_hour
+    if old != body.tokens_per_hour:
+        audit(db, actor, "schedule.tokens_per_hour", f"clinic:{dc.id}", old=old, new=body.tokens_per_hour)
+    db.commit()
+    directory.clear_cache()
+    return _schedule_json(db, dc)
+
+
+@router.put("/clinics/{doctor_clinic_id}/minutes-per-patient")
+def set_minutes_per_patient(doctor_clinic_id: uuid.UUID, body: MinutesPerPatientIn, actor: CanManageSchedule, db: Db):
+    """How long the doctor usually takes per patient here (null: measured each day). Patients'
+    expected times and "get ready" messages follow it."""
+    dc = _slot(db, actor, doctor_clinic_id)
+    old = dc.minutes_per_patient
+    dc.minutes_per_patient = body.minutes_per_patient
+    if old != body.minutes_per_patient:
+        audit(db, actor, "schedule.minutes_per_patient", f"clinic:{dc.id}", old=old, new=body.minutes_per_patient)
+    session = db.scalar(select(OpdSession).where(OpdSession.doctor_clinic_id == dc.id, OpdSession.date == today_ist()))
+    if session is not None:
+        notifications.queue_progress(db, session)
+    db.commit()
+    if session is not None:
+        threading.Thread(target=notifications.deliver_due, daemon=True).start()
+        notify.queue_changed(session, dc.doctor_id)
+    return _schedule_json(db, dc)
 
 
 @router.post("/clinics/{doctor_clinic_id}/exceptions")

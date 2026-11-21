@@ -125,6 +125,56 @@ def booked_by_date(db: DbSession, dc: DoctorClinic, first: date, last: date) -> 
     return dict(rows)
 
 
+@dataclass(frozen=True)
+class HourSlot:
+    """One hour of OPD that patients can pick, when the slot limits tokens per hour."""
+
+    start: time
+    end: time
+    capacity: int
+    first_token: int  # this hour's tokens are first_token .. first_token + capacity - 1
+
+    @property
+    def tokens(self) -> range:
+        return range(self.first_token, self.first_token + self.capacity)
+
+
+def hour_slots(plan: DayPlan, per_hour: int | None) -> list[HourSlot]:
+    """The day's OPD cut into hours from its start (e.g. 10-11, 11-12, 12-12:30).
+
+    Token numbers follow the hours so the queue stays in time order. A last part-hour gets a
+    share of the hourly limit (30 minutes of 10 an hour: 5), at least one.
+    """
+    if not per_hour or not plan.open or plan.start is None or plan.end is None:
+        return []
+    slots = []
+    at, end, first = datetime.combine(plan.date, plan.start), datetime.combine(plan.date, plan.end), 1
+    while at < end:
+        nxt = min(at + timedelta(hours=1), end)
+        minutes = (nxt - at).total_seconds() / 60
+        capacity = per_hour if minutes >= 60 else max(1, round(per_hour * minutes / 60))
+        slots.append(HourSlot(at.time(), nxt.time(), capacity, first))
+        first += capacity
+        at = nxt
+    return slots
+
+
+def booked_by_hour(db: DbSession, dc: DoctorClinic, first: date, last: date) -> dict[tuple[date, time], int]:
+    """Tokens (not cancelled) per (date, hour start) for bookings that chose an hour."""
+    rows = db.execute(
+        select(OpdSession.date, Booking.slot_start, func.count(Booking.id))
+        .join(Booking, Booking.session_id == OpdSession.id)
+        .where(
+            OpdSession.doctor_clinic_id == dc.id,
+            OpdSession.date.between(first, last),
+            Booking.status != "CANCELLED",
+            Booking.slot_start.is_not(None),
+        )
+        .group_by(OpdSession.date, Booking.slot_start)
+    ).all()
+    return {(d, s): n for d, s, n in rows}
+
+
 def minutes_per_patient(plan: DayPlan) -> float | None:
     """With a limit, the doctor's hours spread evenly over it (e.g. 4 hours / 30 = 8 minutes)."""
     if not plan.open or not plan.limit or not plan.start or not plan.end:

@@ -2,7 +2,7 @@
 
 import hmac
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -17,6 +17,7 @@ from app.timeutil import IST, now_ist
 MAX_DAYS_AHEAD = 7
 ACTIVE_STATUSES = ("WAITING", "WITH_DOCTOR")
 DEFAULT_CONSULT_MINUTES = 10
+MIN_CONSULT_MINUTES = 3
 BOOKING_NOT_FOUND = "We couldn't find that booking. Check the link and try again."
 
 
@@ -142,8 +143,15 @@ def add_booking(
     booking_id: uuid.UUID | None = None,
     tracking_code_hash: str | None = None,
     allow_over_limit: bool = False,
+    slot_start: time | None = None,
+    choose_hour: bool = False,
 ) -> tuple[Booking, str | None]:
     """Give the patient the next token. The caller must hold the session lock (lock_session).
+
+    When the clinic limits tokens per hour, the token comes from an hour's numbers: the hour the
+    patient chose (choose_hour: online booking and moving a token, which must send slot_start),
+    else the first hour from now with room (walk-ins, paid bookings). If every hour is full, a
+    walk-in goes after the last hour.
 
     Returns the booking and a new tracking code, or None for the code when the caller passed
     tracking_code_hash (the patient already has their code from the payment step).
@@ -169,11 +177,12 @@ def add_booking(
     if tracking_code_hash is None:
         code = security.new_tracking_code()
         tracking_code_hash = security.hash_token(code)
-    last_token = db.scalar(select(func.max(Booking.token)).where(Booking.session_id == session.id))
+    token, hour = _token_for(db, session, plan, slot_start, choose_hour)
     booking = Booking(
         id=booking_id or uuid.uuid4(),
         session_id=session.id,
-        token=(last_token or 0) + 1,
+        token=token,
+        slot_start=hour,
         patient=patient,
         visit_type=visit_type,
         source=source,
@@ -183,6 +192,59 @@ def add_booking(
     db.add(booking)
     db.flush()
     return booking, code
+
+
+def _token_for(db: DbSession, session: OpdSession, plan, slot_start: time | None, choose_hour: bool) -> tuple[int, time | None]:
+    """The token number (and chosen hour) for a new booking in this session."""
+    hours = schedule.hour_slots(plan, session.doctor_clinic.tokens_per_hour)
+    taken = set(db.scalars(select(Booking.token).where(Booking.session_id == session.id, Booking.status != "CANCELLED")))
+    after_last = max(taken | {h.tokens[-1] for h in hours} | {0}) + 1 if hours else None
+    if not hours:
+        last = db.scalar(select(func.max(Booking.token)).where(Booking.session_id == session.id))
+        return (last or 0) + 1, None
+
+    in_hour = dict(
+        db.execute(
+            select(Booking.slot_start, func.count(Booking.id))
+            .where(Booking.session_id == session.id, Booking.status != "CANCELLED", Booking.slot_start.is_not(None))
+            .group_by(Booking.slot_start)
+        ).all()
+    )
+
+    def free_number(h: schedule.HourSlot) -> int | None:
+        if in_hour.get(h.start, 0) >= h.capacity:
+            return None
+        return next((n for n in h.tokens if n not in taken), None)
+
+    now = now_ist()
+    is_today = session.date == now.date()
+    if choose_hour:
+        if slot_start is None:
+            raise HTTPException(400, "Choose a time for your visit.")
+        hour = next((h for h in hours if h.start == slot_start), None)
+        if hour is None:
+            raise HTTPException(400, "Choose one of the times shown.")
+        if is_today and now.time() >= hour.end:
+            raise HTTPException(409, "That time is over. Choose a later time.")
+        n = free_number(hour)
+        if n is None:
+            raise HTTPException(409, "That time is full. Choose another time.")
+        return n, hour.start
+
+    for h in hours:
+        if is_today and now.time() >= h.end:
+            continue
+        n = free_number(h)
+        if n is not None:
+            return n, h.start
+    return after_last, None
+
+
+def _slot_end(plan, dc: DoctorClinic, start: time | None) -> time | None:
+    if start is None:
+        return None
+    hour = next((h for h in schedule.hour_slots(plan, dc.tokens_per_hour) if h.start == start), None)
+    return hour.end if hour else (datetime.combine(plan.date, start) + timedelta(hours=1)).time()
 
 
 def precheck_online_booking(db: DbSession, dc: DoctorClinic, day: date, name: str, phone: str) -> None:
@@ -241,7 +303,9 @@ def average_consult_minutes(db: DbSession, session_id: uuid.UUID) -> float:
             Booking.status.in_(("DONE", "SENT_FOR_TESTS")),
         )
     )
-    return float(seconds) / 60 if seconds else DEFAULT_CONSULT_MINUTES
+    # At least a few minutes: one patient marked done straight after being called (a mistake,
+    # or a quick query) mustn't make everyone's wait look like nothing.
+    return max(float(seconds) / 60, MIN_CONSULT_MINUTES) if seconds else DEFAULT_CONSULT_MINUTES
 
 
 def _clock(at: datetime) -> str:
@@ -250,32 +314,64 @@ def _clock(at: datetime) -> str:
     return (at - timedelta(minutes=at.minute % 5)).strftime("%H:%M")
 
 
-def wait_estimates(db: DbSession, session: OpdSession, patients_ahead: list[int], now: datetime | None = None) -> list[tuple[int, str] | None]:
-    """For each waiting patient (given how many wait before them): minutes until their turn
-    and roughly what time that is.
+def usual_minutes(db: DbSession, session: OpdSession) -> float:
+    """Minutes per patient when one isn't set on the booking: the clinic's usual time, else
+    (before OPD) the day's hours spread over its limit, else the average so far today."""
+    dc = session.doctor_clinic
+    if dc.minutes_per_patient:
+        return float(dc.minutes_per_patient)
+    average = average_consult_minutes(db, session.id)
+    if session.status == "NOT_STARTED":
+        return schedule.minutes_per_patient(schedule.day_plan(db, dc, session.date)) or average
+    return average
 
-    - Not started: from the day's start (or now, if the doctor is late), spacing patients by the
-      day's hours ÷ limit, or the usual consult time.
-    - In OPD: from now, by the average consult time so far.
-    - On a break: the same, after the time left on the break (none once it has run over).
-    - Closed: no estimate.
+
+def turn_times(db: DbSession, session: OpdSession, now: datetime | None = None) -> list[tuple[Booking, int, datetime]]:
+    """Every waiting patient, in queue order, with the minutes until their turn and that time.
+
+    Each patient before them counts for their own time with the doctor (consult_minutes) or the
+    usual time, and whoever is with the doctor for what's left of theirs.
+
+    - Not started: from the day's start (or now, if the doctor is late).
+    - In OPD: from now. On a break: after the time left on the break.
+    - Closed: nobody.
     """
     now = now or now_ist()
     if session.status == "CLOSED":
-        return [None for _ in patients_ahead]
-    average = average_consult_minutes(db, session.id)
+        return []
+    usual = usual_minutes(db, session)
+    rows = db.scalars(
+        select(Booking).where(Booking.session_id == session.id, Booking.status.in_(ACTIVE_STATUSES)).order_by(Booking.token)
+    ).all()
     if session.status == "NOT_STARTED":
         plan = schedule.day_plan(db, session.doctor_clinic, session.date)
         if not plan.open or plan.start is None:
-            return [None for _ in patients_ahead]
-        each = schedule.minutes_per_patient(plan) or average
-        start = datetime.combine(session.date, plan.start, tzinfo=IST)
-        base = max(start, now)
-        return [(max(round((base - now).total_seconds() / 60 + a * each), 0), _clock(base + timedelta(minutes=a * each))) for a in patients_ahead]
-    pause = 0.0
-    if session.status == "ON_BREAK" and session.break_until is not None:
-        pause = max((session.break_until - now).total_seconds() / 60, 0)
-    return [(round(pause + a * average), _clock(now + timedelta(minutes=pause + a * average))) for a in patients_ahead]
+            return []
+        at = max(datetime.combine(session.date, plan.start, tzinfo=IST), now)
+    else:
+        at = now
+        if session.status == "ON_BREAK" and session.break_until is not None:
+            at = max(session.break_until, now)
+        # In OPD, whoever is with the doctor still needs what's left of their time. (A doctor
+        # on a break has finished with them, even if they weren't marked done yet.)
+        for b in rows if session.status == "IN_OPD" else []:
+            if b.status == "WITH_DOCTOR":
+                spent = (now - b.called_at).total_seconds() / 60 if b.called_at else 0
+                at += timedelta(minutes=max((b.consult_minutes or usual) - spent, 0))
+    result = []
+    for b in rows:
+        if b.status != "WAITING":
+            continue
+        result.append((b, max(round((at - now).total_seconds() / 60), 0), at))
+        at += timedelta(minutes=b.consult_minutes or usual)
+    return result
+
+
+def wait_estimates(db: DbSession, session: OpdSession, patients_ahead: list[int], now: datetime | None = None) -> list[tuple[int, str] | None]:
+    """For each waiting patient (given how many wait before them): minutes until their turn
+    and roughly what time that is (HH:MM, rounded down to 5 minutes)."""
+    times = turn_times(db, session, now)
+    return [(times[a][1], _clock(times[a][2])) if 0 <= a < len(times) else None for a in patients_ahead]
 
 
 def queue_status(db: DbSession, booking: Booking) -> dict:
@@ -296,6 +392,10 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
         found = wait_estimates(db, session, [ahead])[0]
         if found:
             estimate, expected_at = found
+        # Not before the hour they chose (patients ahead may have booked earlier hours).
+        chosen = schedule.hhmm(booking.slot_start)
+        if chosen and expected_at and expected_at < chosen:
+            expected_at = chosen
     # Who is with the doctor right now (not just the last token called, which stays after
     # that patient is marked seen).
     with_doctor = db.scalar(
@@ -313,11 +413,15 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
         "sessionStartedAt": session.started_at.isoformat() if session.started_at else None,
         "breakUntil": session.break_until.isoformat() if session.break_until else None,
         "sessionId": str(session.id),
+        "doctorClinicId": str(dc.id),
         "date": session.date.isoformat(),
         "doctorName": dc.doctor.full_name,
         "clinicName": dc.clinic.name,
         "opdStart": schedule.hhmm(plan.start) or dc.opd_start.strftime("%H:%M"),
         "opdEnd": schedule.hhmm(plan.end) or dc.opd_end.strftime("%H:%M"),
+        # The hour the patient chose, when the clinic limits tokens per hour.
+        "slotStart": schedule.hhmm(booking.slot_start),
+        "slotEnd": schedule.hhmm(_slot_end(plan, dc, booking.slot_start)),
         "expectedAt": expected_at,
         "dayNote": plan.note,
     }

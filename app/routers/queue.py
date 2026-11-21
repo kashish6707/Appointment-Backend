@@ -14,7 +14,7 @@ from app import bookings, notifications, notify
 from app.access import Actor, CanAddWalkIns, CanCall, CanManageOpd, CanSetOutcome, audit
 from app.deps import Db
 from app.models import Booking, DoctorClinic, OpdSession
-from app.schemas import BookingStatusIn, BreakIn, ExtendBreakIn, WalkInIn
+from app.schemas import BookingStatusIn, BreakIn, ConsultMinutesIn, ExtendBreakIn, WalkInIn
 from app.serializers import booking_item, session_json
 from app.timeutil import now_ist, today_ist
 
@@ -282,6 +282,29 @@ def apply_outcome(booking: Booking, status: str) -> bool:
         booking.completed_at = None
     booking.status = status
     return True
+
+
+@router.put("/bookings/{booking_id}/consult-minutes")
+def set_consult_minutes(booking_id: uuid.UUID, body: ConsultMinutesIn, actor: CanCall, db: Db, background: BackgroundTasks):
+    """How long this patient will need with the doctor (null: the usual time). Expected times
+    of everyone after them move, and they're told if theirs moved a lot later."""
+    found = db.execute(
+        select(Booking.id, Booking.session_id).join(OpdSession).join(DoctorClinic).where(Booking.id == booking_id, actor.slot_filter())
+    ).first()
+    if found is None:
+        raise HTTPException(404, BOOKING_NOT_FOUND)
+    session = _lock_session(db, actor, found.session_id)  # the queue's lock, like every queue change
+    booking = db.get(Booking, booking_id)
+    if booking.status not in bookings.ACTIVE_STATUSES:
+        raise HTTPException(409, "Only a waiting patient, or the one with the doctor, can be given a time.")
+    if booking.consult_minutes != body.minutes:
+        audit(db, actor, "booking.consult_minutes", f"booking:{booking.id}", token=booking.token, old=booking.consult_minutes, new=body.minutes)
+        booking.consult_minutes = body.minutes
+        notifications.queue_progress(db, session)
+        db.commit()
+        background.add_task(notifications.deliver_due)
+        notify.booking_and_queue(booking, actor.doctor.id, "booking.updated")
+    return booking_item(booking)
 
 
 @router.patch("/bookings/{booking_id}/status")

@@ -11,11 +11,11 @@ Generated from `app/notifications.py` by `python -m scripts.whatsapp_templates`.
 
 **English (en)**
 ```
-Hello {{1}}, your token number is {{2}} for {{3}} at {{4}} on {{5}}. OPD starts around {{6}}. Follow the queue live: {{7}} . Clinically
+Hello {{1}}, your token number is {{2}} for {{3}} at {{4}} on {{5}}. Please come by {{6}}. Follow the queue live: {{7}} . Clinically
 ```
 **Hindi (hi)**
 ```
-नमस्ते {{1}}, {{4}} में {{3}} के लिए {{5}} को आपका टोकन नंबर {{2}} है। ओपीडी लगभग {{6}} पर शुरू होगी। लाइन लाइव देखें: {{7}} . Clinically
+नमस्ते {{1}}, {{4}} में {{3}} के लिए {{5}} को आपका टोकन नंबर {{2}} है। कृपया {{6}} तक आ जाएँ। लाइन लाइव देखें: {{7}} . Clinically
 ```
 Samples: {{1}} = Sunita Devi, {{2}} = 12, {{3}} = Dr. Rajeev Anand, {{4}} = Anand Ortho Care, {{5}} = Thu 20 Nov, {{6}} = 10 am, {{7}} = https://clinically.in/track/abc?code=xyz
 
@@ -47,13 +47,25 @@ Samples: {{1}} = Dr. Rajeev Anand, {{2}} = 15, {{3}} = 11:30 am, {{4}} = 12, {{5
 
 **English (en)**
 ```
-Clinically: Get ready, only {{1}} patients are before your token {{2}} for {{3}} at {{4}}. Please start coming to the clinic. Live queue: {{5}} . Thank you
+Clinically: Get ready, your turn for token {{1}} with {{2}} at {{3}} is in about {{4}} minutes (around {{5}}). Please reach the clinic. Live queue: {{6}} . Thank you
 ```
 **Hindi (hi)**
 ```
-Clinically: तैयार हो जाइए, {{4}} में {{3}} के लिए आपके टोकन {{2}} से पहले सिर्फ़ {{1}} मरीज़ हैं। कृपया क्लिनिक आना शुरू करें। लाइव लाइन: {{5}} . धन्यवाद
+Clinically: तैयार हो जाइए, {{3}} में {{2}} के पास टोकन {{1}} की आपकी बारी लगभग {{4}} मिनट में ({{5}} के आसपास) है। कृपया क्लिनिक पहुँचें। लाइव लाइन: {{6}} . धन्यवाद
 ```
-Samples: {{1}} = 2, {{2}} = 12, {{3}} = Dr. Rajeev Anand, {{4}} = Anand Ortho Care, {{5}} = https://clinically.in/track/abc?code=xyz
+Samples: {{1}} = 12, {{2}} = Dr. Rajeev Anand, {{3}} = Anand Ortho Care, {{4}} = 20, {{5}} = 11:40 am, {{6}} = https://clinically.in/track/abc?code=xyz
+
+## `clinically_running_late`
+
+**English (en)**
+```
+Clinically: {{1}} is running late. The new expected time for your token {{2}} is around {{3}}. Live queue: {{4}} . Sorry for the wait
+```
+**Hindi (hi)**
+```
+Clinically: {{1}} को देर हो रही है। आपके टोकन {{2}} का नया अनुमानित समय लगभग {{3}} है। लाइव लाइन: {{4}} . इंतज़ार के लिए क्षमा करें
+```
+Samples: {{1}} = Dr. Rajeev Anand, {{2}} = 12, {{3}} = 12:10 pm, {{4}} = https://clinically.in/track/abc?code=xyz
 
 ## `clinically_you_are_next`
 

@@ -123,11 +123,11 @@ def test_home_card_summary_waiting_and_doctors(client, make_slot, db):
     assert rajeev["fee"] == 400 and rajeev["initials"] == "RA"
 
 
-def test_photo_and_registration_need_consent(client, make_slot, db):
+def test_photo_always_shown_registration_needs_consent(client, make_slot, db):
     slot = make_slot(registration_no="BMC-777")
     set_doctor(db, slot, photo_key="doctors/x.jpg", photo_content_type="image/jpeg")
     doctor = home(client).json()["clinics"][0]["doctors"][0]
-    assert doctor["photoUrl"] is None and doctor["registrationNo"] is None and doctor["initials"]
+    assert doctor["photoUrl"].startswith(f"/api/public/doctors/{slot.doctor_id}/photo") and doctor["registrationNo"] is None
 
     set_doctor(db, slot, photo_consent_at=now_ist())
     from app import directory

@@ -141,7 +141,7 @@ def test_wait_estimate_uses_todays_consult_times(client, opd, db):
     three = opd["bookings"][2]
     s = client.get(f"/api/public/bookings/{three['bookingId']}", params={"code": three["trackingCode"]}).json()
     assert s["patientsAhead"] == 0  # token 2 is with the doctor, not waiting
-    assert s["estimatedMinutes"] == 0
+    assert s["estimatedMinutes"] == 6  # what's left of token 2's time, at today's 6 minutes each
 
     act(client, opd, "end")
     s = client.get(f"/api/public/bookings/{three['bookingId']}", params={"code": three["trackingCode"]}).json()

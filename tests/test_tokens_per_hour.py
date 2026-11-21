@@ -108,3 +108,26 @@ def test_turning_the_limit_off(client, make_slot):
     set_per_hour(client, slot, None)
     assert hours_of(client, slot)["hours"] == []
     assert book(client, slot, 1).json()["token"] == 1
+
+
+def test_switching_on_mid_day_keeps_earlier_patients_first(client, make_slot, db):
+    from sqlalchemy import text
+
+    slot = make_slot()  # all day, so "now" is inside OPD today
+    today = today_ist()
+    early = [book(client, slot, i, day=today).json()["token"] for i in (1, 2, 3)]
+    assert early == [1, 2, 3]
+    auth = set_per_hour(client, slot, 2)
+    session = db.scalar(text("SELECT id::text FROM opd_sessions"))
+    db.commit()
+    walk = client.post(f"/api/doctor/sessions/{session}/walk-ins", headers=auth, json={"name": "Desk One", "age": 50, "gender": "FEMALE"})
+    assert walk.status_code == 201 and walk.json()["booking"]["token"] > 3
+    last_hour = hours_of(client, slot, today)["hours"][-1]["start"]
+    online = book(client, slot, 4, last_hour, day=today)
+    assert online.status_code == 201 and online.json()["token"] > walk.json()["booking"]["token"]
+
+
+def test_hour_numbers_start_at_one_on_a_fresh_day(client, make_slot):
+    slot = make_slot(start=time(10, 0), end=time(12, 0))
+    set_per_hour(client, slot, 2)
+    assert book(client, slot, 1, "10:00").json()["token"] == 1

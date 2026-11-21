@@ -197,11 +197,25 @@ def add_booking(
 def _token_for(db: DbSession, session: OpdSession, plan, slot_start: time | None, choose_hour: bool) -> tuple[int, time | None]:
     """The token number (and chosen hour) for a new booking in this session."""
     hours = schedule.hour_slots(plan, session.doctor_clinic.tokens_per_hour)
-    taken = set(db.scalars(select(Booking.token).where(Booking.session_id == session.id, Booking.status != "CANCELLED")))
-    after_last = max(taken | {h.tokens[-1] for h in hours} | {0}) + 1 if hours else None
     if not hours:
         last = db.scalar(select(func.max(Booking.token)).where(Booking.session_id == session.id))
         return (last or 0) + 1, None
+    taken = set(db.scalars(select(Booking.token).where(Booking.session_id == session.id, Booking.status != "CANCELLED")))
+
+    # Switched on after patients booked today: the hours' numbers start after theirs, so nobody
+    # new jumps ahead of them. Fixed once per session (an overflow walk-in later doesn't move it).
+    if session.hour_token_base is None:
+        has_hours = db.scalar(
+            select(func.count()).select_from(Booking).where(Booking.session_id == session.id, Booking.slot_start.is_not(None))
+        )
+        last = db.scalar(select(func.max(Booking.token)).where(Booking.session_id == session.id))
+        session.hour_token_base = 0 if has_hours else (last or 0)
+    base = session.hour_token_base
+
+    def numbers(h: schedule.HourSlot) -> range:
+        return range(base + h.first_token, base + h.first_token + h.capacity)
+
+    after_last = max(taken | {numbers(h)[-1] for h in hours} | {0}) + 1
 
     in_hour = dict(
         db.execute(
@@ -214,7 +228,7 @@ def _token_for(db: DbSession, session: OpdSession, plan, slot_start: time | None
     def free_number(h: schedule.HourSlot) -> int | None:
         if in_hour.get(h.start, 0) >= h.capacity:
             return None
-        return next((n for n in h.tokens if n not in taken), None)
+        return next((n for n in numbers(h) if n not in taken), None)
 
     now = now_ist()
     is_today = session.date == now.date()

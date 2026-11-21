@@ -379,6 +379,9 @@ class OpdSession(Base):
     status: Mapped[str] = mapped_column(Text, default="NOT_STARTED", server_default="NOT_STARTED")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     current_token: Mapped[int | None] = mapped_column(Integer)
+    # Tokens per hour: the hours' numbers start after this one (the tokens given out before the
+    # clinic switched it on that day). Set when the first hour-based token is handed out.
+    hour_token_base: Mapped[int | None] = mapped_column(Integer)
     # When "End OPD" was pressed. The patient it marked DONE has completed_at equal to this,
     # which is how "Reopen OPD" finds them again.
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

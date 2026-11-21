@@ -254,6 +254,23 @@ def _token_for(db: DbSession, session: OpdSession, plan, slot_start: time | None
     return after_last, None
 
 
+def _whatsapp_state(db: DbSession, booking: Booking) -> str:
+    """Whether the patient gets updates on WhatsApp: ON, OFF (they didn't ask, or gave no number)
+    or FAILED (messages to their number failed and none got through, e.g. it isn't on WhatsApp)."""
+    from app.models import Notification  # local: keeps the module's imports small
+
+    if not booking.whatsapp_opt_in or not booking.patient.phone:
+        return "OFF"
+    rows = dict(
+        db.execute(
+            select(Notification.status, func.count(Notification.id))
+            .where(Notification.booking_id == booking.id, Notification.status.in_(("SENT", "FAILED")))
+            .group_by(Notification.status)
+        ).all()
+    )
+    return "FAILED" if rows.get("FAILED") and not rows.get("SENT") else "ON"
+
+
 def _slot_end(plan, dc: DoctorClinic, start: time | None) -> time | None:
     if start is None:
         return None
@@ -434,6 +451,7 @@ def queue_status(db: DbSession, booking: Booking) -> dict:
         "opdStart": schedule.hhmm(plan.start) or dc.opd_start.strftime("%H:%M"),
         "opdEnd": schedule.hhmm(plan.end) or dc.opd_end.strftime("%H:%M"),
         # The hour the patient chose, when the clinic limits tokens per hour.
+        "whatsapp": _whatsapp_state(db, booking),
         "slotStart": schedule.hhmm(booking.slot_start),
         "slotEnd": schedule.hhmm(_slot_end(plan, dc, booking.slot_start)),
         "expectedAt": expected_at,

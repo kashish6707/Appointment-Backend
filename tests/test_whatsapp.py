@@ -167,3 +167,14 @@ def test_templates_and_texts_match():
         en, hi = (sorted(set(re.findall(r"\{(\d)\}", t))) for t in (kind.en, kind.hi))
         assert en == hi and en == [str(i) for i in range(1, len(en) + 1)], kind.template
         assert not kind.en.startswith("{") and not kind.en.rstrip().endswith("}")  # Meta rejects these
+
+
+def test_tracking_says_whether_whatsapp_reaches_the_patient(client, make_slot, db):
+    slot = make_slot()
+    on = book(client, slot, 1)
+    off = book(client, slot, 2, whatsapp=False)
+    status = lambda b: client.get(f"/api/public/bookings/{b['bookingId']}", params={"code": b["trackingCode"]}).json()["whatsapp"]
+    assert status(on) == "ON" and status(off) == "OFF"
+    db.execute(text("UPDATE notifications SET status = 'FAILED' WHERE booking_id = :b"), {"b": on["bookingId"]})
+    db.commit()
+    assert status(on) == "FAILED"
